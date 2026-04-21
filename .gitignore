@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+build/
+.vite/
+*.log
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# App runtime data
+backend/data/
+backend/uploads/
+backend/rag_data/
+backend/ppt_templates/*.pptx
+!backend/ppt_templates/.gitkeep
+
+# SQLite
+*.db
+*.sqlite
+*.sqlite3

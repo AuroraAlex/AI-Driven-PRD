@@ -1,0 +1,40 @@
+{
+  "id": "aspice",
+  "name": "ASPICE",
+  "description": "Automotive SPICE (ASPICE) requirements specification — SWE.1 / SYS.2 aligned",
+  "sections": [
+    {
+      "id": "stakeholder_requirements",
+      "title": "1. Stakeholder Requirements (SYS.2)",
+      "subsections": ["1.1 Stakeholder Identification", "1.2 Operational Scenarios", "1.3 Stakeholder Needs", "1.4 Constraints"],
+      "prompt_hint": "Identify all stakeholders and document their needs as formal stakeholder requirements (StRS-xxx). Include operational scenarios."
+    },
+    {
+      "id": "system_requirements",
+      "title": "2. System Requirements (SYS.3)",
+      "subsections": ["2.1 Functional Requirements", "2.2 Non-Functional Requirements", "2.3 Interface Requirements", "2.4 Safety Requirements (ASIL)"],
+      "prompt_hint": "Derive system-level requirements (SysRS-xxx) from stakeholder needs. Tag each with ASIL level if applicable."
+    },
+    {
+      "id": "software_requirements",
+      "title": "3. Software Requirements (SWE.1)",
+      "subsections": ["3.1 Functional SW Requirements", "3.2 SW Interface Requirements", "3.3 SW Performance Requirements", "3.4 SW Safety Requirements"],
+      "prompt_hint": "Specify software requirements (SwRS-xxx) derived from system requirements. Maintain traceability."
+    },
+    {
+      "id": "traceability",
+      "title": "4. Requirements Traceability Matrix",
+      "prompt_hint": "Create a traceability table: StRS → SysRS → SwRS. Show bidirectional links."
+    },
+    {
+      "id": "verification_criteria",
+      "title": "5. Verification Criteria (SWE.4)",
+      "prompt_hint": "For each SwRS, define verification criteria (method: review/test/simulation, environment, pass/fail criteria)."
+    },
+    {
+      "id": "change_history",
+      "title": "6. Document Change History",
+      "prompt_hint": "Provide a change history table with version, date, author, description of change."
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "custom",
+  "name": "Custom",
+  "description": "User-defined structure — fill in your own sections",
+  "sections": [
+    {
+      "id": "section_1",
+      "title": "Section 1",
+      "prompt_hint": "Describe the content for this section."
+    },
+    {
+      "id": "section_2",
+      "title": "Section 2",
+      "prompt_hint": "Describe the content for this section."
+    }
+  ]
+}

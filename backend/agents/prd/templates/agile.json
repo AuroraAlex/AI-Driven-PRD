@@ -1,0 +1,42 @@
+{
+  "id": "agile",
+  "name": "Agile / User Story",
+  "description": "Lightweight agile PRD with epics, user stories and acceptance criteria",
+  "sections": [
+    {
+      "id": "overview",
+      "title": "Product Overview",
+      "prompt_hint": "Summarize the product vision, goals and target users in 2-3 paragraphs."
+    },
+    {
+      "id": "epics",
+      "title": "Epics",
+      "prompt_hint": "List the major epics (high-level features). For each epic provide: title, description, business value."
+    },
+    {
+      "id": "user_stories",
+      "title": "User Stories",
+      "prompt_hint": "Break each epic into user stories using the format: 'As a [role], I want [feature] so that [benefit]'. Group by epic."
+    },
+    {
+      "id": "acceptance_criteria",
+      "title": "Acceptance Criteria",
+      "prompt_hint": "For each user story provide 3-5 Given/When/Then acceptance criteria."
+    },
+    {
+      "id": "non_functional",
+      "title": "Non-Functional Requirements",
+      "prompt_hint": "List performance, security, scalability and usability requirements."
+    },
+    {
+      "id": "constraints",
+      "title": "Constraints & Assumptions",
+      "prompt_hint": "List technical constraints, business constraints and key assumptions."
+    },
+    {
+      "id": "sprint_plan",
+      "title": "Suggested Sprint Plan",
+      "prompt_hint": "Suggest a sprint breakdown (Sprint 1-N) with user stories per sprint and estimated effort."
+    }
+  ]
+}
