@@ -59,9 +59,11 @@ export default function ExcalidrawCanvas({ projectId }: Props) {
   const initialized = useRef(false)
   const lastSavedElementsJson = useRef<string>('[]')
   const isRestoring = useRef(false)
-  const lastMinimapBump = useRef<number>(0)
+  const lastMinimapBump = useRef(0)
+  const lastSelectedId = useRef<string | null>(null)
 
-  // Stable API setter — avoid creating a new callback each render
+  // Stable API callback — must not change identity across renders, or Excalidraw
+  // will treat it as a new prop and re-trigger its internal effects → infinite loop.
   const handleApi = useCallback((api: ExcalidrawImperativeAPI) => {
     setExcalidrawAPI(api)
     useCanvasStore.getState().setApi(api)
@@ -107,7 +109,7 @@ export default function ExcalidrawCanvas({ projectId }: Props) {
     const currentElementsJson = JSON.stringify(excalidrawAPI.getSceneElements())
     if (currentElementsJson === lastSavedElementsJson.current) return
 
-    // Bump minimap change counter (throttled to 500ms to avoid render storms)
+    // Bump minimap change counter — throttled to avoid render storms
     const now = Date.now()
     if (now - lastMinimapBump.current > 500) {
       lastMinimapBump.current = now
@@ -143,7 +145,6 @@ export default function ExcalidrawCanvas({ projectId }: Props) {
   }, [excalidrawAPI, projectId])
 
   // Update inspector when selection changes — only when it actually changes
-  const lastSelectedId = useRef<string | null>(null)
   const handlePointerUp = useCallback(() => {
     if (!excalidrawAPI) return
     const appState = excalidrawAPI.getAppState()

@@ -1,20 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { Send, Bot, User } from 'lucide-react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Send, Bot, User, Settings } from 'lucide-react'
 import clsx from 'clsx'
-import { chatApi } from '../../api/client'
+import { chatApi, settingsApi } from '../../api/client'
 import { useChatStore } from '../../store/chatStore'
 import { Button, Spinner } from '../ui'
-
-const MODELS = [
-  { label: 'GPT-4o', value: 'openai/gpt-4o' },
-  { label: 'GPT-4o mini', value: 'openai/gpt-4o-mini' },
-  { label: 'Claude 3.5 Sonnet', value: 'anthropic/claude-sonnet-4-5' },
-  { label: 'Claude 3.5 Haiku', value: 'anthropic/claude-haiku-3-5' },
-  { label: 'Qwen-Max (百炼)', value: 'dashscope/qwen-max' },
-  { label: 'Qwen-Plus (百炼)', value: 'dashscope/qwen-plus' },
-  { label: 'Qwen-Turbo (百炼)', value: 'dashscope/qwen-turbo' },
-]
+import SettingsModal from '../ui/SettingsModal'
 
 const RAG_MODES = ['hybrid', 'local', 'global', 'naive']
 
@@ -27,7 +18,43 @@ export default function ChatPanel({ projectId }: Props) {
     setMessages, addMessage, setStreaming, appendToken, clearBuffer,
     setModel, setRagMode } = useChatStore()
   const [input, setInput] = useState('')
+  const [showSettings, setShowSettings] = useState(false)
+  const [customModel, setCustomModel] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
+  const qc = useQueryClient()
+
+  const CUSTOM_VALUE = '__custom__'
+
+  // Fetch available models based on configured API keys
+  const { data: models = [], isLoading: modelsLoading } = useQuery({
+    queryKey: ['available-models'],
+    queryFn: settingsApi.models,
+    staleTime: 30_000,
+  })
+
+  // Auto-select first available model when models load or change
+  useEffect(() => {
+    if (models.length > 0 && (!model || !models.find(m => m.value === model))) {
+      setModel(models[0].value)
+    }
+  }, [models])
+
+  // Whether the current model value is the custom one
+  const isCustom = model === CUSTOM_VALUE || (
+    model !== '' && models.length > 0 && !models.find(m => m.value === model)
+  )
+
+  function handleModelChange(val: string) {
+    if (val === CUSTOM_VALUE) {
+      setModel(CUSTOM_VALUE)
+      setCustomModel('')
+    } else {
+      setModel(val)
+    }
+  }
+
+  // Effective model sent to the API
+  const effectiveModel = isCustom ? customModel.trim() : model
 
   // Load history on mount
   useQuery({
@@ -50,7 +77,7 @@ export default function ChatPanel({ projectId }: Props) {
       id: crypto.randomUUID(),
       role: 'user' as const,
       content: text,
-      model_used: model,
+      model_used: effectiveModel,
       trace_id: null,
       created_at: new Date().toISOString(),
     }
@@ -59,7 +86,7 @@ export default function ChatPanel({ projectId }: Props) {
     clearBuffer()
 
     try {
-      const res = await chatApi.stream(projectId, text, model, ragMode)
+      const res = await chatApi.stream(projectId, text, effectiveModel, ragMode)
       if (!res.body) throw new Error('No body')
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
@@ -108,15 +135,53 @@ export default function ChatPanel({ projectId }: Props) {
 
   return (
     <div className="flex flex-col h-full">
+      {showSettings && (
+        <SettingsModal
+          onClose={() => {
+            setShowSettings(false)
+            qc.invalidateQueries({ queryKey: ['available-models'] })
+          }}
+        />
+      )}
+
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--border)] shrink-0">
-        <select
-          className="text-xs border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
-          value={model}
-          onChange={e => setModel(e.target.value)}
-        >
-          {MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
-        </select>
+        {modelsLoading ? (
+          <div className="flex items-center gap-1.5 text-xs text-[var(--text-tertiary)]">
+            <Spinner size={12} /> 加载模型…
+          </div>
+        ) : models.length === 0 ? (
+          <button
+            onClick={() => setShowSettings(true)}
+            className="flex items-center gap-1.5 text-xs text-[var(--warning)] hover:opacity-80 transition-opacity"
+          >
+            <Settings size={12} /> 请先配置 API Key
+          </button>
+        ) : (
+          <>
+            <select
+              className="text-xs border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
+              value={isCustom ? CUSTOM_VALUE : model}
+              onChange={e => handleModelChange(e.target.value)}
+            >
+              {models.map(m => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+              <option value={CUSTOM_VALUE}>自定义模型…</option>
+            </select>
+            {isCustom && (
+              <input
+                type="text"
+                className="text-xs border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] w-36"
+                placeholder="provider/model-name"
+                value={customModel}
+                onChange={e => setCustomModel(e.target.value)}
+                autoFocus
+                spellCheck={false}
+              />
+            )}
+          </>
+        )}
         <select
           className="text-xs border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
           value={ragMode}
@@ -124,6 +189,13 @@ export default function ChatPanel({ projectId }: Props) {
         >
           {RAG_MODES.map(m => <option key={m} value={m}>RAG: {m}</option>)}
         </select>
+        <button
+          onClick={() => setShowSettings(true)}
+          className="ml-auto text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"
+          title="配置 API Key"
+        >
+          <Settings size={14} />
+        </button>
       </div>
 
       {/* Messages */}
@@ -154,7 +226,7 @@ export default function ChatPanel({ projectId }: Props) {
           <Button
             className="self-end"
             onClick={handleSend}
-            disabled={!input.trim() || streaming}
+            disabled={!input.trim() || streaming || (isCustom && !customModel.trim())}
           >
             {streaming ? <Spinner size={14} /> : <Send size={14} />}
           </Button>

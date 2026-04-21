@@ -1,14 +1,16 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, FileText } from 'lucide-react'
+import { Plus, Trash2, FileText, Settings } from 'lucide-react'
 import { projectsApi, type Project } from '../api/client'
 import { GlassCard, Button, Spinner } from '../components/ui'
+import SettingsModal from '../components/ui/SettingsModal'
 
 export default function Home() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [creating, setCreating] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
 
@@ -44,10 +46,18 @@ export default function Home() {
               Collaborative product requirements powered by AI
             </p>
           </div>
-          <Button onClick={() => setCreating(true)}>
-            <Plus size={16} /> New Project
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={() => setShowSettings(true)}>
+              <Settings size={16} /> API Keys
+            </Button>
+            <Button onClick={() => setCreating(true)}>
+              <Plus size={16} /> New Project
+            </Button>
+          </div>
         </div>
+
+        {/* Settings modal */}
+        {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
 
         {/* Create project modal */}
         {creating && (
@@ -55,14 +65,14 @@ export default function Home() {
             <GlassCard className="w-full max-w-md shadow-[var(--shadow-lg)]">
               <h2 className="text-lg font-semibold mb-4">New Project</h2>
               <input
-                className="w-full border border-[var(--border)] rounded-[var(--radius-sm)] px-3 py-2 text-sm mb-3 bg-white focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                className="w-full border border-[var(--border)] rounded-[var(--radius-sm)] px-3 py-2 text-sm mb-3 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 placeholder="Project name"
                 value={name}
                 onChange={e => setName(e.target.value)}
                 autoFocus
               />
               <textarea
-                className="w-full border border-[var(--border)] rounded-[var(--radius-sm)] px-3 py-2 text-sm mb-4 bg-white focus:outline-none focus:ring-2 focus:ring-[var(--accent)] resize-none"
+                className="w-full border border-[var(--border)] rounded-[var(--radius-sm)] px-3 py-2 text-sm mb-4 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] resize-none"
                 placeholder="Description (optional)"
                 rows={3}
                 value={desc}

@@ -155,3 +155,36 @@ export const exportApi = {
       responseType: 'blob',
     }).then(r => r.data as Blob),
 }
+
+// ── Settings ──────────────────────────────────────────────────────────────
+
+export interface ProviderStatus {
+  configured: boolean
+  preview: string
+}
+
+export interface SettingsOut {
+  openai: ProviderStatus
+  anthropic: ProviderStatus
+  dashscope: ProviderStatus
+}
+
+export interface SettingsIn {
+  openai_api_key?: string | null
+  anthropic_api_key?: string | null
+  dashscope_api_key?: string | null
+}
+
+export interface ModelInfo {
+  label: string
+  value: string
+  provider: string
+}
+
+export const settingsApi = {
+  get: () => http.get<SettingsOut>('/settings').then(r => r.data),
+  update: (data: SettingsIn) => http.put<SettingsOut>('/settings', data).then(r => r.data),
+  models: () => http.get<{ models: ModelInfo[] }>('/settings/models').then(r => r.data.models),
+  verify: (provider: string, api_key: string) =>
+    http.post<{ valid: boolean; message: string }>('/settings/verify', { provider, api_key }).then(r => r.data),
+}

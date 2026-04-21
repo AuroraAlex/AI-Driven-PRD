@@ -16,7 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
 from infra.db import init_db
-from app.api import projects, canvas, canvas_snapshot, files, chat, rag, prd, export
+from app.api import projects, canvas, canvas_snapshot, files, chat, rag, prd, export, settings as settings_api
+from app.api.settings import apply_settings_to_env, load_saved_settings
 
 
 @asynccontextmanager
@@ -24,6 +25,8 @@ async def lifespan(app: FastAPI):
     # Startup
     get_settings().ensure_dirs()
     await init_db()
+    # Restore persisted API keys into os.environ
+    apply_settings_to_env(load_saved_settings())
     yield
     # Shutdown (nothing to clean up currently)
 
@@ -58,6 +61,7 @@ def create_app() -> FastAPI:
     app.include_router(rag.router, prefix=prefix)
     app.include_router(prd.router, prefix=prefix)
     app.include_router(export.router, prefix=prefix)
+    app.include_router(settings_api.router, prefix=prefix)
 
     @app.get("/health", tags=["health"])
     async def health():
