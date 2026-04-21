@@ -245,6 +245,7 @@ export default function ExcalidrawCanvas({ projectId }: Props) {
       <Excalidraw
         excalidrawAPI={handleApi}
         onChange={handleChange}
+        langCode="zh-CN"
         UIOptions={{ canvasActions: { saveToActiveFile: false, loadScene: false } }}
       />
       {saveStatus !== 'idle' && (

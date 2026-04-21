@@ -59,6 +59,7 @@ class AgentContext:
 
     # RAG settings
     rag_mode: Literal["naive", "local", "global", "hybrid"] = "hybrid"
+    rag_enabled: bool = True
 
     # LLM settings (LiteLLM format: "openai/gpt-4o", "anthropic/claude-3-5-sonnet-…")
     model: str = "openai/gpt-4o"
@@ -68,7 +69,7 @@ class AgentContext:
 
     @property
     def has_rag_ready_files(self) -> bool:
-        return any(f.rag_ready for f in self.attached_files)
+        return self.rag_enabled and any(f.rag_ready for f in self.attached_files)
 
 
 # ─────────────────────────────────────────────────────────────

@@ -31,6 +31,53 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
+# Heuristic mapping from model-name prefix to LiteLLM provider prefix.
+# Used when the user supplies a bare model name (no "provider/" segment),
+# e.g. "qwen-plus", "gpt-4o", "claude-sonnet-4-5".
+_MODEL_PREFIX_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("gpt-", "o1", "o3", "o4-", "chatgpt-", "text-embedding-", "davinci", "babbage"), "openai"),
+    (("claude-",), "anthropic"),
+    (("qwen", "qwq", "qvq", "deepseek-", "llama", "baichuan", "yi-"), "dashscope"),
+    (("gemini-",), "gemini"),
+)
+
+# Map settings field → LiteLLM provider prefix, used as fallback when the
+# model name carries no recognizable prefix.
+_PROVIDER_FIELDS: tuple[tuple[str, str], ...] = (
+    ("dashscope_api_key", "dashscope"),
+    ("openai_api_key", "openai"),
+    ("anthropic_api_key", "anthropic"),
+)
+
+
+def _normalize_model(model: str, settings=None) -> str:
+    """Ensure the model string carries a LiteLLM provider prefix.
+
+    LiteLLM requires "provider/model" syntax (e.g. "dashscope/qwen-plus").
+    Resolution order for a bare model name:
+      1. Already has "/" → leave as-is.
+      2. Known prefix heuristic (gpt-*, claude-*, qwen*, gemini-*, …).
+      3. Fallback to the only configured provider (if exactly one API key is set).
+      4. Return unchanged and let LiteLLM raise.
+    """
+    if not model or "/" in model:
+        return model
+
+    lower = model.lower()
+    for prefixes, provider in _MODEL_PREFIX_RULES:
+        if any(lower.startswith(p) for p in prefixes):
+            return f"{provider}/{model}"
+
+    # Fallback: if the user has configured exactly one provider, assume that one.
+    s = settings or get_settings()
+    configured = [prov for field, prov in _PROVIDER_FIELDS if getattr(s, field, "")]
+    if len(configured) == 1:
+        logger.info("Model %r has no provider prefix; defaulting to %s/", model, configured[0])
+        return f"{configured[0]}/{model}"
+
+    return model  # let LiteLLM raise its own error if still ambiguous
+
+
 class LLMClient:
     """
     Thin async wrapper around LiteLLM.
@@ -64,7 +111,7 @@ class LLMClient:
         **kwargs: Any,
     ) -> str:
         """Return the full completion as a string."""
-        model = model or self._settings.default_model
+        model = _normalize_model(model or self._settings.default_model, self._settings)
         response = await litellm.acompletion(
             model=model,
             messages=messages,
@@ -84,7 +131,7 @@ class LLMClient:
         **kwargs: Any,
     ) -> AsyncGenerator[str, None]:
         """Yield text tokens as they arrive."""
-        model = model or self._settings.default_model
+        model = _normalize_model(model or self._settings.default_model, self._settings)
         response = await litellm.acompletion(
             model=model,
             messages=messages,

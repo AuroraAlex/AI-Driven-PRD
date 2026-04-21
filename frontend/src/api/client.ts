@@ -120,11 +120,17 @@ export const chatApi = {
   history: (projectId: string) =>
     http.get<ChatMessage[]>(`/projects/${projectId}/chat/history`).then(r => r.data),
   /** Returns a fetch Response for SSE streaming */
-  stream: (projectId: string, message: string, model: string, ragMode: string) =>
+  stream: (
+    projectId: string,
+    message: string,
+    model: string,
+    ragMode: string,
+    ragEnabled: boolean = true,
+  ) =>
     fetch(`/api/projects/${projectId}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, model, rag_mode: ragMode }),
+      body: JSON.stringify({ message, model, rag_mode: ragMode, rag_enabled: ragEnabled }),
     }),
 }
 
@@ -187,4 +193,6 @@ export const settingsApi = {
   models: () => http.get<{ models: ModelInfo[] }>('/settings/models').then(r => r.data.models),
   verify: (provider: string, api_key: string) =>
     http.post<{ valid: boolean; message: string }>('/settings/verify', { provider, api_key }).then(r => r.data),
+  verifyModel: (model: string) =>
+    http.post<{ valid: boolean; message: string }>('/settings/verify-model', { model }).then(r => r.data),
 }

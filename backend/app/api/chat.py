@@ -22,6 +22,7 @@ class ChatRequest(BaseModel):
     message: str
     model: str = "openai/gpt-4o"
     rag_mode: str = "hybrid"
+    rag_enabled: bool = True
 
 
 @router.post("")
@@ -74,6 +75,7 @@ async def stream_chat(
         attached_files=file_contexts,
         chat_history=history,
         rag_mode=req.rag_mode,
+        rag_enabled=req.rag_enabled,
         model=req.model,
     )
 

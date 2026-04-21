@@ -67,6 +67,15 @@ class VerifyOut(BaseModel):
     message: str
 
 
+class VerifyModelIn(BaseModel):
+    model: str      # full LiteLLM id, e.g. "dashscope/qwen3-72b-instruct"
+
+
+class VerifyModelOut(BaseModel):
+    valid: bool
+    message: str
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _mask(key: str) -> str:
@@ -167,35 +176,33 @@ _PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
         {"label": "Claude Opus 4", "value": "anthropic/claude-opus-4-5"},
     ],
     "dashscope": [
-        {"label": "Qwen-Max (百炼)", "value": "dashscope/qwen-max"},
-        {"label": "Qwen-Plus (百炼)", "value": "dashscope/qwen-plus"},
-        {"label": "Qwen-Turbo (百炼)", "value": "dashscope/qwen-turbo"},
-        {"label": "Qwen3-235B (百炼)", "value": "dashscope/qwen3-235b-a22b"},
+        {"label": "Qwen-Max", "value": "dashscope/qwen-max"},
+        {"label": "Qwen-Plus", "value": "dashscope/qwen-plus"},
+        {"label": "Qwen-Turbo", "value": "dashscope/qwen-turbo"},
+        {"label": "Qwen3-235B", "value": "dashscope/qwen3-235b-a22b"},
     ],
 }
-
-# Maximum preset models returned (last slot is reserved for custom input in UI)
-_MAX_PRESET_MODELS = 4
 
 
 @router.get("/models", response_model=ModelsOut)
 async def list_available_models():
-    """Return at most 4 models for providers that have an API key configured."""
+    """Return preset models for every provider that has an API key configured.
+
+    The UI groups these by `provider` and appends a "custom model" option
+    per platform, so no server-side cap is needed.
+    """
     status = _current_status()
-    models: list[ModelInfo] = []
-    provider_status = {
+    provider_configured = {
         "openai": status.openai.configured,
         "anthropic": status.anthropic.configured,
         "dashscope": status.dashscope.configured,
     }
-    for provider, available in provider_status.items():
-        if available:
-            for m in _PROVIDER_MODELS.get(provider, []):
-                if len(models) >= _MAX_PRESET_MODELS:
-                    break
-                models.append(ModelInfo(provider=provider, **m))
-        if len(models) >= _MAX_PRESET_MODELS:
-            break
+    models: list[ModelInfo] = []
+    for provider, available in provider_configured.items():
+        if not available:
+            continue
+        for m in _PROVIDER_MODELS.get(provider, []):
+            models.append(ModelInfo(provider=provider, **m))
     return ModelsOut(models=models)
 
 
@@ -246,3 +253,42 @@ async def verify_api_key(body: VerifyIn):
         return VerifyOut(valid=False, message="请求超时，请检查网络连接")
     except Exception as e:
         return VerifyOut(valid=False, message=f"网络错误: {str(e)[:60]}")
+
+
+@router.post("/verify-model", response_model=VerifyModelOut)
+async def verify_model(body: VerifyModelIn):
+    """Check whether a (possibly custom) model id is usable.
+
+    Performs a minimal non-streaming completion through LiteLLM using the
+    currently configured credentials. Returns a friendly error message
+    suitable for display in the UI.
+    """
+    from infra.llm import LLMClient  # local import avoids startup cost
+
+    model = (body.model or "").strip()
+    if not model:
+        return VerifyModelOut(valid=False, message="模型 ID 不能为空")
+
+    try:
+        client = LLMClient()
+        reply = await client.complete(
+            [{"role": "user", "content": "ping"}],
+            model=model,
+            temperature=0,
+            max_tokens=4,
+        )
+        if reply is None:
+            return VerifyModelOut(valid=False, message="模型返回为空")
+        return VerifyModelOut(valid=True, message="验证成功 ✓")
+    except Exception as e:
+        msg = str(e)
+        low = msg.lower()
+        if "api key" in low or "authentication" in low or "401" in msg:
+            hint = "API Key 无效或未配置"
+        elif "not found" in low or "404" in msg or "does not exist" in low:
+            hint = "模型不存在或无访问权限"
+        elif "llm provider" in low:
+            hint = "模型 ID 缺少平台前缀（如 openai/、dashscope/）"
+        else:
+            hint = msg.splitlines()[0][:120] if msg else "未知错误"
+        return VerifyModelOut(valid=False, message=f"验证失败：{hint}")
