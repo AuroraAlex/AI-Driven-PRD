@@ -32,25 +32,27 @@ export default function WorkspaceShell({ projectId, canvasSessionId, chatSession
       <div className="h-full w-full p-2 bg-[var(--bg-base)]">
         <Group
           orientation="horizontal"
-          className="h-full flex gap-2"
+          className="h-full"
           defaultLayout={defaultLayout}
           onLayoutChanged={onLayoutChanged}
         >
-          <Panel id="col-left" defaultSize={22} minSize={16} maxSize={32} className="h-full">
+          <Panel id="col-left" defaultSize={22} minSize={10} maxSize={45}>
             <LeftColumn
               projectId={projectId}
               canvasSessionId={canvasSessionId}
               uploadInputId={UPLOAD_INPUT_ID}
             />
           </Panel>
-          <Separator className="w-1 mx-0.5 rounded bg-transparent hover:bg-[var(--accent-light)] transition-colors cursor-col-resize" />
+          <Separator className="w-1.5 bg-transparent hover:bg-[var(--accent-light)] transition-colors" />
 
-          <Panel id="col-center" defaultSize={50} minSize={30} maxSize={64} className="h-full">
-            <CenterFlipCard projectId={projectId} canvasSessionId={canvasSessionId} />
+          <Panel id="col-center" defaultSize={50} minSize={25} maxSize={75}>
+            <div className="h-full px-2">
+              <CenterFlipCard projectId={projectId} canvasSessionId={canvasSessionId} />
+            </div>
           </Panel>
-          <Separator className="w-1 mx-0.5 rounded bg-transparent hover:bg-[var(--accent-light)] transition-colors cursor-col-resize" />
+          <Separator className="w-1.5 bg-transparent hover:bg-[var(--accent-light)] transition-colors" />
 
-          <Panel id="col-right" defaultSize={28} minSize={18} maxSize={40} className="h-full">
+          <Panel id="col-right" defaultSize={28} minSize={12} maxSize={50}>
             <div className="h-full flex flex-col bg-[var(--bg-surface)] rounded-[var(--radius-lg)] border border-[var(--border)] overflow-hidden">
               <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--border)] shrink-0">
                 <MessageSquare size={14} className="text-[var(--accent)]" />

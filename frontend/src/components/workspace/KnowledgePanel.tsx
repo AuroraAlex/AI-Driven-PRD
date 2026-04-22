@@ -110,8 +110,8 @@ export default function KnowledgePanel({ projectId }: Props) {
     actionIcon: React.ReactNode
   }) {
     return (
-      <div className="flex-1 min-w-0 flex flex-col bg-white border border-[var(--border)] rounded-[var(--radius-md)] overflow-hidden">
-        <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] bg-[var(--bg-surface)]">
+      <div className="flex-1 min-w-0 flex flex-col bg-[var(--bg-surface)] border border-[var(--border)] rounded-[var(--radius-md)] overflow-hidden">
+        <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] bg-[var(--bg-base)]">
           <span className="text-sm font-semibold text-[var(--text-primary)]">{title}</span>
           <span className="text-xs text-[var(--text-tertiary)]">{rows.length}</span>
         </div>

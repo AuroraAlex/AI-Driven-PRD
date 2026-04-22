@@ -29,11 +29,11 @@ export default function LeftColumn({ projectId, canvasSessionId, uploadInputId }
   return (
     <Group
       orientation="vertical"
-      className="h-full flex flex-col"
+      className="h-full"
       defaultLayout={defaultLayout}
       onLayoutChanged={onLayoutChanged}
     >
-      <Panel id="left-top" defaultSize={55} minSize={25} maxSize={80}>
+      <Panel id="left-top" defaultSize={55} minSize={20} maxSize={85}>
         <div className="h-full flex flex-col bg-[var(--bg-surface)] rounded-t-[var(--radius-lg)] border border-[var(--border)] border-b-0 overflow-hidden">
           <ResourcePanel
             projectId={projectId}
@@ -46,8 +46,8 @@ export default function LeftColumn({ projectId, canvasSessionId, uploadInputId }
           />
         </div>
       </Panel>
-      <Separator className="h-1 bg-transparent hover:bg-[var(--accent-light)] transition-colors cursor-row-resize" />
-      <Panel id="left-bottom" defaultSize={45} minSize={20} maxSize={75}>
+      <Separator className="h-1.5 bg-transparent hover:bg-[var(--accent-light)] transition-colors" />
+      <Panel id="left-bottom" defaultSize={45} minSize={15} maxSize={80}>
         <div className="h-full flex flex-col bg-[var(--bg-surface)] rounded-b-[var(--radius-lg)] border border-[var(--border)] border-t-0 overflow-hidden">
           {face === 'canvas' ? (
             <>

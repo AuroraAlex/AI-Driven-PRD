@@ -98,7 +98,7 @@ export default function TemplateModal({ projectId, onOpen }: Props) {
               ))}
             </div>
             <select
-              className="w-full text-xs border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1.5 mb-4 bg-white focus:outline-none"
+              className="w-full text-xs border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1.5 mb-4 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
               value={model}
               onChange={e => setModel(e.target.value)}
             >

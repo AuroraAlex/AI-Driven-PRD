@@ -84,10 +84,17 @@ export default function SessionSwitcher({ projectId, kind, onChange, className }
   const createMut = useMutation({
     mutationFn: () => api.create(projectId),
     onSuccess: (s) => {
-      qc.invalidateQueries({ queryKey })
+      // Insert the new session into the cache immediately. Without this the
+      // auto-select effect can fire on a stale cache (which doesn't contain
+      // the new session yet) and overwrite our just-set activeId with the
+      // first existing session.
+      qc.setQueryData<AnySession[]>(queryKey, (prev = []) => [...prev, s])
       setActiveId(s.id)
       onChange?.(s.id)
       setOpen(false)
+      // Re-fetch to pick up server-side fields, but cache + activeId are
+      // already coherent so the effect's bail condition will hold.
+      qc.invalidateQueries({ queryKey })
     },
   })
 
