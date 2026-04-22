@@ -1,17 +1,15 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, Database, FileText } from 'lucide-react'
 import { projectsApi } from '../api/client'
 import WorkspaceShell from '../components/workspace/WorkspaceShell'
-import KnowledgeModal from '../components/workspace/KnowledgeModal'
 import { useSessionStore } from '../store/sessionStore'
 import { useCanvasStore } from '../store/canvasStore'
 
 export default function Workspace() {
   const { projectId } = useParams<{ projectId: string }>()
   const navigate = useNavigate()
-  const [showKnowledge, setShowKnowledge] = useState(false)
 
   const sessionStore = useSessionStore()
   const setCurrentCanvasSessionId = useCanvasStore(s => s.setCurrentCanvasSessionId)
@@ -46,7 +44,7 @@ export default function Workspace() {
         </span>
         <div className="flex items-center gap-1 ml-auto">
           <button
-            onClick={() => setShowKnowledge(true)}
+            onClick={() => navigate(`/projects/${projectId}/knowledge`)}
             className="flex items-center gap-1.5 px-3 py-1 rounded-[var(--radius-sm)] text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--accent-light)] hover:text-[var(--accent)] transition-colors"
           >
             <Database size={14} />
@@ -70,10 +68,6 @@ export default function Workspace() {
           chatSessionId={chatSessionId}
         />
       </div>
-
-      {showKnowledge && (
-        <KnowledgeModal projectId={projectId} onClose={() => setShowKnowledge(false)} />
-      )}
     </div>
   )
 }

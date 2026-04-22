@@ -35,11 +35,20 @@ def _make_engine():
         echo=settings.debug,
         connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},
     )
-    # Enable WAL mode for SQLite to allow concurrent readers during writes
+    # Enable WAL mode for SQLite to allow concurrent readers during writes,
+    # plus a generous busy_timeout so writers wait instead of failing with
+    # "database is locked" when several background ingestion jobs touch the
+    # same db within the same tick.
     if "sqlite" in settings.database_url:
         @event.listens_for(engine.sync_engine, "connect")
         def _set_wal(dbapi_conn, _connection_record):
-            dbapi_conn.execute("PRAGMA journal_mode=WAL")
+            cur = dbapi_conn.cursor()
+            try:
+                cur.execute("PRAGMA journal_mode=WAL")
+                cur.execute("PRAGMA busy_timeout=10000")  # ms
+                cur.execute("PRAGMA synchronous=NORMAL")
+            finally:
+                cur.close()
     return engine
 
 
@@ -101,3 +110,33 @@ async def init_db() -> None:
     import infra.models  # noqa: F401
     async with get_engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Lightweight ad-hoc migrations: SQLite supports ADD COLUMN but
+        # `create_all` skips existing tables, so any new column on an
+        # already-created table needs an explicit ALTER. Wrap each in
+        # try/except so re-runs are no-ops.
+        await conn.run_sync(_apply_adhoc_migrations)
+
+
+def _apply_adhoc_migrations(sync_conn) -> None:
+    from sqlalchemy import text
+    pending: list[tuple[str, str, str]] = [
+        # (table, column, ddl-fragment)
+        ("project_settings", "rerank_model", "VARCHAR(128)"),
+        ("project_settings", "min_rerank_score", "FLOAT"),
+        # Per-component provider overrides (NULL → auto-detect from configured keys).
+        ("project_settings", "embedding_provider", "VARCHAR(32)"),
+        ("project_settings", "extraction_provider", "VARCHAR(32)"),
+        ("project_settings", "rerank_provider", "VARCHAR(32)"),
+    ]
+    for table, column, ddl in pending:
+        try:
+            cols = sync_conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+            if any(row[1] == column for row in cols):
+                continue
+            sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        except Exception:
+            # Non-SQLite back-ends or first-time creation will hit harmless
+            # errors; ignore so app startup never blocks on migrations.
+            pass
+    _ = text  # silence unused if migrations are removed
+

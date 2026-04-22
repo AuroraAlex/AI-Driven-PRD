@@ -30,6 +30,7 @@ from app.api import (
     references,
     ai_cards,
     settings as settings_api,
+    project_settings,
 )
 from app.api.settings import apply_settings_to_env, load_saved_settings
 
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
     app.include_router(references.router, prefix=prefix)
     app.include_router(ai_cards.router, prefix=prefix)
     app.include_router(settings_api.router, prefix=prefix)
+    app.include_router(project_settings.router, prefix=prefix)
 
     @app.get("/health", tags=["health"])
     async def health():

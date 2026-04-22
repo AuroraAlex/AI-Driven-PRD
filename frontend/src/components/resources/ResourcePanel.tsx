@@ -39,6 +39,7 @@ function fileIcon(kind: ResourceKind, fileType: string | null) {
 const STATUS_LABEL: Record<ResourceRagStatus, string> = {
   unindexed: '未入库',
   pending: '排队',
+  queued: '排队',
   indexing: '索引中',
   indexed: '已入库',
   failed: '失败',
@@ -47,6 +48,7 @@ const STATUS_LABEL: Record<ResourceRagStatus, string> = {
 const STATUS_CLASS: Record<ResourceRagStatus, string> = {
   unindexed: 'text-[var(--text-tertiary)]',
   pending: 'text-[var(--text-tertiary)]',
+  queued: 'text-[var(--text-tertiary)]',
   indexing: 'text-[var(--accent)]',
   indexed: 'text-[var(--success)]',
   failed: 'text-[var(--warning)]',

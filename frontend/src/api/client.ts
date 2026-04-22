@@ -17,7 +17,7 @@ export interface Project {
 
 export type ResourceKind = 'file' | 'snippet' | 'document'
 export type ResourceOriginType = 'upload' | 'manual' | 'chat_message' | 'canvas_card' | 'prd_template'
-export type ResourceRagStatus = 'unindexed' | 'pending' | 'indexing' | 'indexed' | 'failed'
+export type ResourceRagStatus = 'unindexed' | 'pending' | 'queued' | 'indexing' | 'indexed' | 'failed'
 
 export interface ResourceBlock {
   id: string
@@ -253,6 +253,20 @@ export const resourcesApi = {
     http.post<ResourceBlock>(`/projects/${projectId}/resources/${resourceId}/index`).then(r => r.data),
   unindex: (projectId: string, resourceId: string) =>
     http.delete<ResourceBlock>(`/projects/${projectId}/resources/${resourceId}/index`).then(r => r.data),
+  indexBatch: (projectId: string, resourceIds: string[]) =>
+    http.post<{ queued: number; skipped: number }>(
+      `/projects/${projectId}/resources/index-batch`,
+      { resource_ids: resourceIds },
+    ).then(r => r.data),
+  unindexBatch: (projectId: string, resourceIds: string[]) =>
+    http.post<{ unindexed: number }>(
+      `/projects/${projectId}/resources/unindex-batch`,
+      { resource_ids: resourceIds },
+    ).then(r => r.data),
+  cancelIngest: (projectId: string) =>
+    http.post<{ drained: number; cancelled_active: boolean; reset_rows: number }>(
+      `/projects/${projectId}/resources/cancel-ingest`,
+    ).then(r => r.data),
 }
 
 /** @deprecated use resourcesApi */
@@ -398,11 +412,130 @@ export const knowledgeApi = {
   sync: (projectId: string, data: { source_type: 'canvas' | 'chat' | 'prd'; session_ids?: string[] }) =>
     http.post<{ indexed: string[]; failed: { doc_id: string; error: string }[] }>(`/projects/${projectId}/rag/sync`, data).then(r => r.data),
   rebuild: (projectId: string) =>
-    http.post<{ message: string }>(`/projects/${projectId}/rag/rebuild`).then(r => r.data),
+    http.post<{ message: string; rebuilt: number; failed: string[] }>(`/projects/${projectId}/rag/rebuild`).then(r => r.data),
   reset: (projectId: string) =>
     http.post<{ message: string }>(`/projects/${projectId}/rag/reset`).then(r => r.data),
   query: (projectId: string, data: { query: string; mode?: string; model?: string }) =>
     http.post<{ query: string; mode: string; results: unknown[] }>(`/projects/${projectId}/rag/query`, data).then(r => r.data),
+  getSettings: (projectId: string) =>
+    http.get<KBSettings>(`/projects/${projectId}/knowledge/settings`).then(r => r.data),
+  updateSettings: (projectId: string, data: Partial<KBSettings>) =>
+    http.put<KBSettings>(`/projects/${projectId}/knowledge/settings`, data).then(r => r.data),
+  verifyComponent: (
+    projectId: string,
+    body: { component: 'llm' | 'embedding' | 'rerank'; model?: string | null; provider?: RAGProvider | null },
+  ) =>
+    http.post<{ valid: boolean; message: string; detail?: string | null }>(
+      `/projects/${projectId}/knowledge/verify`,
+      body,
+    ).then(r => r.data),
+  getGraph: (projectId: string, limit = 500) =>
+    http.get<KBGraph>(`/projects/${projectId}/rag/graph`, { params: { limit } }).then(r => r.data),
+  graphmlUrl: (projectId: string) => `/api/projects/${projectId}/rag/graph.graphml`,
+  getChunks: (projectId: string, params: { limit?: number; offset?: number; search?: string; doc_id?: string } = {}) =>
+    http.get<KBChunkList>(`/projects/${projectId}/rag/chunks`, { params }).then(r => r.data),
+  getProgress: (projectId: string) =>
+    http.get<KBProgress>(`/projects/${projectId}/rag/progress`).then(r => r.data),
+  batchQuery: async (projectId: string, query: string, model?: string) => {
+    const modes: Array<'naive' | 'local' | 'global' | 'hybrid'> = ['naive', 'local', 'global', 'hybrid']
+    const results = await Promise.all(
+      modes.map(async (mode) => {
+        const t0 = performance.now()
+        try {
+          const r = await knowledgeApi.query(projectId, { query, mode, model })
+          return { mode, ok: true as const, ms: Math.round(performance.now() - t0), data: r }
+        } catch (e: unknown) {
+          const message = e instanceof Error ? e.message : String(e)
+          return { mode, ok: false as const, ms: Math.round(performance.now() - t0), error: message }
+        }
+      })
+    )
+    return results
+  },
+}
+
+export type RAGMode = 'naive' | 'local' | 'global' | 'hybrid'
+export type RAGProvider = 'openai' | 'dashscope' | 'anthropic'
+
+export interface KBSettings {
+  project_id: string
+  embedding_model: string | null
+  extraction_model: string | null
+  rerank_model: string | null
+  embedding_provider: RAGProvider | null
+  extraction_provider: RAGProvider | null
+  rerank_provider: RAGProvider | null
+  min_rerank_score: number | null
+  chunk_token_size: number | null
+  chunk_overlap_token_size: number | null
+  top_k: number | null
+  default_rag_mode: RAGMode | null
+  rag_max_instances: number | null
+}
+
+export interface KBGraphNode {
+  id: string
+  label: string
+  type: string
+  description: string
+  degree: number
+}
+
+export interface KBGraphLink {
+  source: string
+  target: string
+  weight: number
+  relation: string
+}
+
+export interface KBGraph {
+  nodes: KBGraphNode[]
+  links: KBGraphLink[]
+  truncated: boolean
+  total_nodes: number
+  total_links: number
+}
+
+export interface KBChunk {
+  chunk_id: string
+  doc_id: string
+  resource_id: string | null
+  resource_title: string | null
+  tokens: number | null
+  chunk_order_index: number | null
+  content: string
+  create_time: number | null
+}
+
+export interface KBChunkList {
+  items: KBChunk[]
+  total: number
+  offset: number
+  limit: number
+}
+
+export interface KBProgress {
+  kb_ready: boolean
+  busy: boolean
+  job_name: string | null
+  latest_message: string | null
+  history_messages: string[]
+  cur_batch: number
+  total_batches: number
+  doc_counts: {
+    pending: number
+    processing: number
+    processed: number
+    failed: number
+  }
+  failed_docs: Array<{
+    doc_id: string
+    summary: string | null
+    error: string | null
+    updated_at: string | null
+  }>
+  queue_depth: number
+  ingest_active: boolean
 }
 
 // ── Documents (Markdown PRDs / docs) ──────────────────────────────────────

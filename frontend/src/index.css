@@ -22,3 +22,9 @@ body,
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+
+/* Indeterminate progress sliding stripe (used by KBStatusBar) */
+@keyframes kbslide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}

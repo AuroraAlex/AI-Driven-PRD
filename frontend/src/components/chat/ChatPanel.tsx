@@ -4,12 +4,14 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Send, Bot, User, Settings, Database, LayoutTemplate,
   Square, RotateCcw, Pencil, Trash2, Copy, Check, ChevronDown, ChevronRight, ChevronUp, Sliders,
-  LayoutPanelLeft, FileText, CheckSquare, X,
+  LayoutPanelLeft, FileText, CheckSquare, X, HelpCircle,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { canvasApi, canvasSessionsApi, chatApi, settingsApi, type ChatMessage, type ChatMessageMeta } from '../../api/client'
+import { RAG_MODE_MAP, type RAGModeMeta } from '../../constants/ragModes'
 import { useChatStore } from '../../store/chatStore'
 import { useCanvasStore } from '../../store/canvasStore'
+import { useKBProgress } from '../knowledge/KBStatusBar'
 import { Button, Spinner } from '../ui'
 import SettingsModal from '../ui/SettingsModal'
 import CustomModelModal from './CustomModelModal'
@@ -60,6 +62,25 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
   const qc = useQueryClient()
   const canvasApiHandle = useCanvasStore(s => s.api)
   const navigate = useNavigate()
+
+  // Knowledge-base readiness — disable RAG controls while indexing or empty.
+  const { data: kbProgress } = useKBProgress(projectId)
+  const kbReady = !!kbProgress?.kb_ready
+  const kbBusy = !!kbProgress?.busy
+  const kbDisabledReason = kbBusy
+    ? '知识库正在索引中，请等待完成后再启用 RAG'
+    : !kbReady
+      ? '知识库尚未就绪，请先在「知识库」页面完成入库'
+      : ''
+
+  // Auto-disable ragEnabled if knowledge base becomes unavailable so we
+  // don't quietly send queries that hit empty / busy storage.
+  useEffect(() => {
+    if (ragEnabled && !kbReady && kbProgress) {
+      setRagEnabled(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kbReady, kbProgress])
 
   /** Pull current text selection if it lies entirely within the given message scope. */
   function selectionWithin(scopeId: string): string | undefined {
@@ -619,23 +640,50 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
             {/* Row: RAG */}
             <div className="flex items-center gap-2">
               <span className="text-[var(--text-tertiary)] w-16 shrink-0 flex items-center gap-1"><Database size={11}/>RAG</span>
-              <label className="flex items-center gap-1 cursor-pointer select-none">
+              <label
+                className={clsx('flex items-center gap-1 select-none', kbReady ? 'cursor-pointer' : 'cursor-not-allowed opacity-50')}
+                title={kbDisabledReason || undefined}
+              >
                 <input
                   type="checkbox"
-                  checked={ragEnabled}
+                  checked={ragEnabled && kbReady}
+                  disabled={!kbReady}
                   onChange={e => setRagEnabled(e.target.checked)}
                   className="accent-[var(--accent)]"
                 />
                 <span className="text-[var(--text-secondary)]">启用</span>
               </label>
-              {ragEnabled && (
-                <select
-                  className="flex-1 min-w-0 border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
-                  value={ragMode}
-                  onChange={e => setRagMode(e.target.value)}
+              {!kbReady && (
+                <button
+                  onClick={() => navigate(`/projects/${projectId}/knowledge`)}
+                  className="text-[10px] text-[var(--accent)] hover:underline shrink-0"
+                  title={kbDisabledReason}
                 >
-                  {RAG_MODES.map(m => <option key={m} value={m}>{m}</option>)}
-                </select>
+                  {kbBusy ? '索引中…' : '去配置'}
+                </button>
+              )}
+              {ragEnabled && kbReady && (
+                <>
+                  <select
+                    className="flex-1 min-w-0 border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
+                    value={ragMode}
+                    onChange={e => setRagMode(e.target.value)}
+                  >
+                    {RAG_MODES.map(m => {
+                      const meta = RAG_MODE_MAP[m as keyof typeof RAG_MODE_MAP] as RAGModeMeta | undefined
+                      return <option key={m} value={m}>{meta?.label ?? m}</option>
+                    })}
+                  </select>
+                  <span
+                    className="text-[var(--text-tertiary)] hover:text-[var(--accent)] cursor-help shrink-0"
+                    title={
+                      (RAG_MODE_MAP[ragMode as keyof typeof RAG_MODE_MAP]?.description ?? '') +
+                      '\n\n适用：' + (RAG_MODE_MAP[ragMode as keyof typeof RAG_MODE_MAP]?.bestFor ?? '')
+                    }
+                  >
+                    <HelpCircle size={12} />
+                  </span>
+                </>
               )}
             </div>
 

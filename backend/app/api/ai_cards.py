@@ -14,7 +14,7 @@ from app.deps import AppDeps, get_deps
 from agents.canvas.ai_card import AICardAgent, AICardContent
 from agents.canvas.context import build_canvas_context
 from agents.base import FileContext
-from infra.models import Canvas, CanvasSession, ResourceBlock
+from infra.models import Canvas, CanvasSession, RAGIndex, ResourceBlock
 
 router = APIRouter(prefix="/projects/{project_id}/ai-cards", tags=["ai-cards"])
 
@@ -75,6 +75,14 @@ async def generate_card(
 
     agent = AICardAgent(deps.chat_agent)
 
+    kb_row = (await deps.db.execute(
+        select(RAGIndex.id).where(
+            RAGIndex.project_id == project_id,
+            RAGIndex.status == "indexed",
+        ).limit(1)
+    )).first()
+    kb_has_indexed = kb_row is not None
+
     async def stream():
         result_payload: dict | None = None
         async for item in agent.generate(
@@ -87,6 +95,7 @@ async def generate_card(
             model=req.model,
             rag_enabled=req.rag_enabled,
             rag_mode=req.rag_mode,
+            kb_has_indexed=kb_has_indexed,
         ):
             if isinstance(item, AICardContent):
                 payload = asdict(item)

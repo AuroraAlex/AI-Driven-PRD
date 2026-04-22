@@ -68,6 +68,10 @@ class AgentContext:
     # RAG settings
     rag_mode: Literal["naive", "local", "global", "hybrid"] = "hybrid"
     rag_enabled: bool = True
+    # True if the project's knowledge graph has at least one indexed doc.
+    # Independent from `attached_files` so RAG fires even when the user
+    # uploaded only snippets/documents (not files).
+    kb_has_indexed: bool = False
 
     # LLM settings (LiteLLM format: "openai/gpt-4o", "anthropic/claude-3-5-sonnet-…")
     model: str = "openai/gpt-4o"
@@ -77,7 +81,11 @@ class AgentContext:
 
     @property
     def has_rag_ready_files(self) -> bool:
-        return self.rag_enabled and any(f.rag_ready for f in self.attached_files)
+        if not self.rag_enabled:
+            return False
+        if self.kb_has_indexed:
+            return True
+        return any(f.rag_ready for f in self.attached_files)
 
 
 # ─────────────────────────────────────────────────────────────

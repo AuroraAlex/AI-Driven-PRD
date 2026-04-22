@@ -57,6 +57,7 @@ class AICardAgent:
         model: str = "openai/gpt-4o",
         rag_enabled: bool = True,
         rag_mode: str = "hybrid",
+        kb_has_indexed: bool = False,
     ) -> AsyncGenerator[AgentEvent | AICardContent, None]:
         ctx = AgentContext(
             project_id=project_id,
@@ -72,6 +73,7 @@ class AICardAgent:
             include_canvas_context=bool(canvas_text),
             rag_enabled=rag_enabled,
             rag_mode=rag_mode,
+            kb_has_indexed=kb_has_indexed,
             model=model,
         )
 

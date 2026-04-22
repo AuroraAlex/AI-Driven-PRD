@@ -20,6 +20,7 @@ from infra.models import (
     CanvasSession,
     ChatMessage,
     ChatSession,
+    RAGIndex,
     ResourceBlock,
 )
 
@@ -473,6 +474,15 @@ async def _build_context(
             history_msgs.pop()
     history = [Message(role=m.role, content=m.content) for m in history_msgs]
 
+    # Does this project have at least one document in the LightRAG graph?
+    kb_row = (await deps.db.execute(
+        select(RAGIndex.id).where(
+            RAGIndex.project_id == project_id,
+            RAGIndex.status == "indexed",
+        ).limit(1)
+    )).first()
+    kb_has_indexed = kb_row is not None
+
     ctx = AgentContext(
         project_id=project_id,
         user_query=req.message,
@@ -485,6 +495,7 @@ async def _build_context(
         canvas_context_mode=req.canvas_context_mode,  # type: ignore[arg-type]
         rag_mode=req.rag_mode,
         rag_enabled=req.rag_enabled,
+        kb_has_indexed=kb_has_indexed,
         model=req.model,
     )
     return ctx, valid_canvas_ids, canvas_text

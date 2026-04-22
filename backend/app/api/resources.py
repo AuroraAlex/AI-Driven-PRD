@@ -6,8 +6,11 @@ file-kind resources only (see legacy_files_router below).
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
@@ -24,6 +27,178 @@ router = APIRouter(prefix="/projects/{project_id}/resources", tags=["resources"]
 
 # Compatibility alias for the old /files endpoints (file-kind only).
 legacy_files_router = APIRouter(prefix="/projects/{project_id}/files", tags=["files"])
+
+logger = logging.getLogger(__name__)
+
+
+# ── Per-project ingestion queue ──────────────────────────────────────────────
+#
+# LightRAG's pipeline is not safe for concurrent invocations on the same
+# workspace, AND every background ingestion job needs its own DB session
+# (otherwise SQLite contends with concurrent foreground requests, surfacing
+# as "database is locked"). To keep things simple and bullet-proof we run a
+# single asyncio worker per project that drains a queue one job at a time.
+# Different projects still ingest in parallel (one worker each).
+
+@dataclass
+class _IngestJob:
+    project_id: str
+    resource_id: str
+    text: str
+
+
+_INGEST_QUEUES: dict[str, "asyncio.Queue[_IngestJob]"] = {}
+_INGEST_WORKERS: dict[str, asyncio.Task] = {}
+# True while the worker is mid-`upsert` for a given project. Combined with
+# queue.qsize() this lets the UI distinguish "waiting" from "processing".
+_INGEST_ACTIVE: dict[str, bool] = {}
+
+
+def ingest_queue_depth(project_id: str) -> int:
+    """Number of jobs still WAITING in the queue (excludes the one currently
+    being processed). Used by /rag/progress to show a non-overlapping
+    'waiting' chip alongside LightRAG's own 'processing' counter.
+    """
+    q = _INGEST_QUEUES.get(project_id)
+    return q.qsize() if q else 0
+
+
+def ingest_active(project_id: str) -> bool:
+    """True if the worker is currently inside `rag_agent.upsert`."""
+    return bool(_INGEST_ACTIVE.get(project_id))
+
+
+def _ensure_worker(project_id: str, rag_agent) -> "asyncio.Queue[_IngestJob]":
+    """Lazily spin up the per-project worker + queue."""
+    queue = _INGEST_QUEUES.get(project_id)
+    if queue is None:
+        queue = asyncio.Queue()
+        _INGEST_QUEUES[project_id] = queue
+    task = _INGEST_WORKERS.get(project_id)
+    if task is None or task.done():
+        _INGEST_WORKERS[project_id] = asyncio.create_task(
+            _ingest_worker_loop(project_id, queue, rag_agent),
+            name=f"ingest-worker:{project_id}",
+        )
+    return queue
+
+
+async def _ingest_worker_loop(
+    project_id: str,
+    queue: "asyncio.Queue[_IngestJob]",
+    rag_agent,
+) -> None:
+    """Drain the queue forever; one ingestion at a time per project."""
+    from infra.db import get_session  # local import to avoid cycles
+    while True:
+        job: _IngestJob = await queue.get()
+        _INGEST_ACTIVE[project_id] = True
+        try:
+            await _process_one(job, rag_agent, get_session)
+        except asyncio.CancelledError:
+            # Worker cancelled (interrupt). Re-raise so the task ends cleanly.
+            _INGEST_ACTIVE[project_id] = False
+            raise
+        except Exception:
+            logger.exception("Ingest worker crashed on job %s", job.resource_id)
+        finally:
+            _INGEST_ACTIVE[project_id] = False
+            queue.task_done()
+
+
+async def _process_one(job: _IngestJob, rag_agent, get_session) -> None:
+    doc_id = f"resource:{job.resource_id}"
+    # Mark indexing in its own short-lived session, then commit so the row
+    # is visible to other readers immediately.
+    async with get_session() as session:
+        idx = (await session.execute(
+            select(RAGIndex).where(
+                RAGIndex.project_id == job.project_id,
+                RAGIndex.doc_id == doc_id,
+            )
+        )).scalar_one_or_none()
+        rb = await session.get(ResourceBlock, job.resource_id)
+        if rb is None:
+            # Resource deleted while waiting in the queue.
+            if idx is not None:
+                await session.delete(idx)
+            return
+        if idx is None:
+            idx = RAGIndex(
+                id=str(uuid.uuid4()),
+                project_id=job.project_id,
+                source_type=("file" if rb.kind == "file" else "resource"),
+                source_session_id=None,
+                source_ref=job.resource_id,
+                doc_id=doc_id,
+                resource_id=job.resource_id,
+            )
+            session.add(idx)
+        idx.status = "indexing"
+        idx.error_msg = None
+
+    # Heavy lifting OUTSIDE any DB session so SQLite stays unlocked
+    # while we hit the embedding/extraction APIs.
+    err: str | None = None
+    try:
+        await rag_agent.upsert(job.project_id, job.text, doc_id)
+    except Exception as exc:
+        logger.warning("Ingest failed for %s/%s: %s", job.project_id, doc_id, exc)
+        err = str(exc)
+
+    # Final status write in another short session.
+    async with get_session() as session:
+        idx = (await session.execute(
+            select(RAGIndex).where(
+                RAGIndex.project_id == job.project_id,
+                RAGIndex.doc_id == doc_id,
+            )
+        )).scalar_one_or_none()
+        rb = await session.get(ResourceBlock, job.resource_id)
+        if idx is None:
+            return
+        if err is None:
+            idx.status = "indexed"
+            idx.indexed_at = datetime.now(timezone.utc)
+            if rb:
+                rb.is_in_kb = True
+        else:
+            idx.status = "failed"
+            idx.error_msg = err
+
+
+def _enqueue_ingest(project_id: str, resource_id: str, text: str, rag_agent) -> None:
+    """Enqueue a job onto the per-project worker."""
+    queue = _ensure_worker(project_id, rag_agent)
+    queue.put_nowait(_IngestJob(project_id=project_id, resource_id=resource_id, text=text))
+
+
+async def cancel_ingest(project_id: str) -> dict:
+    """Drain the project's queue and cancel any in-flight ingestion.
+
+    Returns counts of (drained, cancelled_active). The worker task is left
+    cancelled; it will be re-spawned lazily on the next enqueue.
+    """
+    drained_ids: list[str] = []
+    queue = _INGEST_QUEUES.get(project_id)
+    if queue is not None:
+        while True:
+            try:
+                job = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            drained_ids.append(job.resource_id)
+            queue.task_done()
+    cancelled_active = False
+    task = _INGEST_WORKERS.get(project_id)
+    if task is not None and not task.done():
+        task.cancel()
+        cancelled_active = True
+        # Drop the cached worker; next enqueue creates a fresh one.
+        _INGEST_WORKERS.pop(project_id, None)
+    _INGEST_ACTIVE[project_id] = False
+    return {"drained": drained_ids, "cancelled_active": cancelled_active}
+
 
 
 # ── Response schema ───────────────────────────────────────────────────────────
@@ -132,37 +307,12 @@ async def _index_resource_background(
     text_content: str,
     rag_agent,
 ) -> None:
-    from infra.db import get_session
-    doc_id = f"resource:{resource_id}"
-    async with get_session() as session:
-        res = await session.execute(
-            select(RAGIndex).where(RAGIndex.project_id == project_id, RAGIndex.doc_id == doc_id)
-        )
-        idx = res.scalar_one_or_none()
-        rb = await session.get(ResourceBlock, resource_id)
-        if idx is None:
-            idx = RAGIndex(
-                id=str(uuid.uuid4()),
-                project_id=project_id,
-                source_type=("file" if rb and rb.kind == "file" else "resource"),
-                source_session_id=None,
-                source_ref=resource_id,
-                doc_id=doc_id,
-                resource_id=resource_id,
-            )
-            session.add(idx)
-        idx.status = "indexing"
-        await session.flush()
-        try:
-            await rag_agent.upsert(project_id, text_content, doc_id)
-            idx.status = "indexed"
-            idx.indexed_at = datetime.now(timezone.utc)
-            if rb:
-                rb.is_in_kb = True
-        except Exception as exc:
-            idx.status = "failed"
-            idx.error_msg = str(exc)
-        await session.flush()
+    """Compatibility wrapper — enqueue onto the per-project worker.
+
+    Kept synchronous-looking so existing call sites (FastAPI BackgroundTasks)
+    don't change shape; the actual ingestion is now serial per project.
+    """
+    _enqueue_ingest(project_id, resource_id, text_content, rag_agent)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -313,6 +463,7 @@ async def upload_file_resource(
     await deps.db.refresh(r)
 
     if auto_index and extracted and extracted.strip():
+        await _mark_queued(deps, project_id, r.id, kind=r.kind)
         background_tasks.add_task(
             _index_resource_background,
             project_id=project_id,
@@ -321,7 +472,34 @@ async def upload_file_resource(
             rag_agent=deps.rag_agent,
         )
 
-    return ResourceOut.from_orm_with_status(r, "indexing" if auto_index else "unindexed")
+    return ResourceOut.from_orm_with_status(r, "queued" if auto_index else "unindexed")
+
+
+async def _mark_queued(
+    deps: AppDeps, project_id: str, resource_id: str, *, kind: str
+) -> None:
+    """Insert/update a `queued` RAGIndex row inside the current request
+    session — guarantees the next /resources poll reflects the queued state.
+    """
+    doc_id = f"resource:{resource_id}"
+    res = await deps.db.execute(
+        select(RAGIndex).where(RAGIndex.project_id == project_id, RAGIndex.doc_id == doc_id)
+    )
+    idx = res.scalar_one_or_none()
+    if idx is None:
+        idx = RAGIndex(
+            id=str(uuid.uuid4()),
+            project_id=project_id,
+            source_type=("file" if kind == "file" else "resource"),
+            source_session_id=None,
+            source_ref=resource_id,
+            doc_id=doc_id,
+            resource_id=resource_id,
+        )
+        deps.db.add(idx)
+    idx.status = "queued"
+    idx.error_msg = None
+    await deps.db.flush()
 
 
 @router.post("/{resource_id}/index", response_model=ResourceOut)
@@ -339,6 +517,7 @@ async def index_resource(
     ) or ""
     if not text_content.strip():
         raise HTTPException(400, "Resource has no indexable content")
+    await _mark_queued(deps, project_id, r.id, kind=r.kind)
     background_tasks.add_task(
         _index_resource_background,
         project_id=project_id,
@@ -346,7 +525,116 @@ async def index_resource(
         text_content=text_content,
         rag_agent=deps.rag_agent,
     )
-    return ResourceOut.from_orm_with_status(r, "indexing")
+    return ResourceOut.from_orm_with_status(r, "queued")
+
+
+# ── Bulk in/out KB ───────────────────────────────────────────────────────────
+
+
+class BulkIdsBody(BaseModel):
+    resource_ids: list[str]
+
+
+@router.post("/index-batch")
+async def index_batch(
+    project_id: str,
+    body: BulkIdsBody,
+    background_tasks: BackgroundTasks,
+    deps: Annotated[AppDeps, Depends(get_deps)],
+):
+    """Enqueue many resources for ingestion. Returns counts."""
+    if not body.resource_ids:
+        return {"queued": 0, "skipped": 0}
+    rows = (await deps.db.execute(
+        select(ResourceBlock).where(
+            ResourceBlock.project_id == project_id,
+            ResourceBlock.id.in_(body.resource_ids),
+        )
+    )).scalars().all()
+    queued = 0
+    skipped = 0
+    for r in rows:
+        text_content = (r.extracted_text if r.kind == "file" else r.markdown_content) or ""
+        if not text_content.strip():
+            skipped += 1
+            continue
+        await _mark_queued(deps, project_id, r.id, kind=r.kind)
+        background_tasks.add_task(
+            _index_resource_background,
+            project_id=project_id,
+            resource_id=r.id,
+            text_content=text_content,
+            rag_agent=deps.rag_agent,
+        )
+        queued += 1
+    return {"queued": queued, "skipped": skipped}
+
+
+@router.post("/unindex-batch")
+async def unindex_batch(
+    project_id: str,
+    body: BulkIdsBody,
+    deps: Annotated[AppDeps, Depends(get_deps)],
+):
+    """Remove many resources from the KB. Synchronous – waits for LightRAG."""
+    if not body.resource_ids:
+        return {"unindexed": 0}
+    rows = (await deps.db.execute(
+        select(ResourceBlock).where(
+            ResourceBlock.project_id == project_id,
+            ResourceBlock.id.in_(body.resource_ids),
+        )
+    )).scalars().all()
+    count = 0
+    for r in rows:
+        doc_id = f"resource:{r.id}"
+        try:
+            await deps.rag_agent.delete_by_doc_id(project_id, doc_id)
+        except Exception as exc:
+            logger.warning("unindex_batch delete failed for %s: %s", doc_id, exc)
+        idx = (await deps.db.execute(
+            select(RAGIndex).where(
+                RAGIndex.project_id == project_id, RAGIndex.doc_id == doc_id
+            )
+        )).scalar_one_or_none()
+        if idx:
+            idx.status = "unindexed"
+            idx.indexed_at = None
+            idx.error_msg = None
+        r.is_in_kb = False
+        count += 1
+    await deps.db.flush()
+    return {"unindexed": count}
+
+
+@router.post("/cancel-ingest")
+async def cancel_ingest_endpoint(
+    project_id: str,
+    deps: Annotated[AppDeps, Depends(get_deps)],
+):
+    """Interrupt: drain the project's ingestion queue and cancel the
+    currently running upsert. Any RAGIndex rows still in `queued` /
+    `indexing` are reset to `unindexed` so the UI reflects reality.
+    """
+    result = await cancel_ingest(project_id)
+    # Reset queued/indexing rows to unindexed.
+    rows = (await deps.db.execute(
+        select(RAGIndex).where(
+            RAGIndex.project_id == project_id,
+            RAGIndex.status.in_(["queued", "indexing"]),
+        )
+    )).scalars().all()
+    reset_count = 0
+    for idx in rows:
+        idx.status = "unindexed"
+        idx.error_msg = "用户中断"
+        reset_count += 1
+    await deps.db.flush()
+    return {
+        "drained": len(result["drained"]),
+        "cancelled_active": result["cancelled_active"],
+        "reset_rows": reset_count,
+    }
 
 
 @router.delete("/{resource_id}/index", response_model=ResourceOut)

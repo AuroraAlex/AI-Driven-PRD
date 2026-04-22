@@ -9,6 +9,7 @@ import clsx from 'clsx'
 import { aiCardsApi, type AICardContent } from '../../api/client'
 import { useCanvasStore } from '../../store/canvasStore'
 import { useChatStore } from '../../store/chatStore'
+import { useKBProgress } from '../knowledge/KBStatusBar'
 import MarkdownMessage from '../chat/MarkdownMessage'
 import { Button, Spinner } from '../ui'
 
@@ -50,6 +51,8 @@ export default function AICardEditor({ projectId, canvasSessionId }: Props) {
   const openAICardId = useCanvasStore(s => s.openAICardId)
   const setOpenAICardId = useCanvasStore(s => s.setOpenAICardId)
   const model = useChatStore(s => s.model)
+  const { data: kbProgress } = useKBProgress(projectId)
+  const kbReady = !!kbProgress?.kb_ready
 
   const card = useMemo(() => (openAICardId ? findAICard(api, openAICardId) : null), [api, openAICardId])
   const initial: AICardContent = useMemo(() => {
@@ -102,6 +105,7 @@ export default function AICardEditor({ projectId, canvasSessionId }: Props) {
       const res = await aiCardsApi.generate(projectId, {
         prompt: draft.prompt,
         model,
+        ragEnabled: kbReady,
         canvasSessionIds: canvasSessionId ? [canvasSessionId] : [],
       })
       if (!res.body) throw new Error('No body')

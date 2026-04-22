@@ -9,9 +9,11 @@ from infra.models.chat_message import ChatMessage
 from infra.models.rag_index import RAGIndex
 from infra.models.ppt_template import PPTTemplate
 from infra.models.reference import Reference, REF_TYPES, REF_RELATIONS
+from infra.models.project_setting import ProjectSetting
 
 __all__ = [
     "Project",
+    "ProjectSetting",
     "CanvasSession",
     "ChatSession",
     "Canvas",
