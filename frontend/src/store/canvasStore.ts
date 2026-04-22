@@ -69,6 +69,9 @@ interface CanvasState {
   // ── AI card editor (modal) ──────────────────────────────────
   openAICardId: string | null
   setOpenAICardId: (id: string | null) => void
+  // ── Resource card viewer (modal) ────────────────────────────
+  openResourceCardId: string | null
+  setOpenResourceCardId: (id: string | null) => void
   // ── AI context stub ───────────────────────────────────────────
   /** Extract all text from canvas elements. Pre-wired for future AI integration. */
   extractText: () => string
@@ -112,6 +115,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
   openAICardId: null,
   setOpenAICardId: id => set({ openAICardId: id }),
+
+  openResourceCardId: null,
+  setOpenResourceCardId: id => set({ openResourceCardId: id }),
 
   extractText: () => {
     const api = get().api

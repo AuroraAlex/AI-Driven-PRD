@@ -279,42 +279,126 @@ export function createPRDCard(x: number, y: number, title = ''): CanvasEl[] {
   return [bg, header, headerText, body]
 }
 
-// ── FILE CARD ─────────────────────────────────────────────────────────────────
+// ── RESOURCE CARD (formerly "FILE CARD") ─────────────────────────────────────
+// Displays a bound resource block (file / document / snippet) with a small
+// preview. The full content is opened in a modal viewer (with pagination).
 
-export function createFileCard(x: number, y: number): CanvasEl[] {
+const RESOURCE_CARD_W = 240
+const RESOURCE_CARD_H = 180
+
+interface ResourceCardData {
+  resourceId?: string | null
+  title?: string | null
+  preview?: string | null
+  kind?: string | null
+}
+
+function previewSnippet(text: string, maxLines = 6, maxChars = 220): string {
+  const cleaned = (text || '').replace(/\r/g, '').trim()
+  if (!cleaned) return ''
+  const lines = cleaned.split('\n').slice(0, maxLines)
+  let out = lines.join('\n')
+  if (out.length > maxChars) out = out.slice(0, maxChars - 1) + '…'
+  return out
+}
+
+export function createFileCard(x: number, y: number, data: ResourceCardData = {}): CanvasEl[] {
   const gid = uid()
-  const W = 200, H = 160
+  const W = RESOURCE_CARD_W, H = RESOURCE_CARD_H
+  const bound = !!data.resourceId
+  const title = data.title?.trim() || (bound ? '未命名资源' : '点击「选择资源」绑定…')
+  const preview = bound ? previewSnippet(data.preview || '') : ''
 
   const bg = base({
     id: uid(), type: 'rectangle', x, y, width: W, height: H,
-    backgroundColor: '#f8f9fa', strokeColor: '#ced4da',
+    backgroundColor: bound ? '#ffffff' : '#f8f9fa',
+    strokeColor: bound ? '#74c0fc' : '#ced4da',
     fillStyle: 'solid', roughness: 0, roundness: { type: 3 }, strokeWidth: 1.5,
-    groupIds: [gid], customData: { nodeType: 'file_card', fileId: null },
+    groupIds: [gid],
+    customData: {
+      nodeType: 'file_card',
+      resourceId: data.resourceId ?? null,
+      kind: data.kind ?? null,
+    },
   })
 
-  const iconArea = base({
+  const headerBar = base({
     id: uid(), type: 'rectangle',
-    x: x + 20, y: y + 20, width: W - 40, height: 90,
-    backgroundColor: '#e9ecef', strokeColor: '#dee2e6',
+    x, y, width: W, height: 28,
+    backgroundColor: bound ? '#e7f5ff' : '#e9ecef',
+    strokeColor: bound ? '#74c0fc' : '#dee2e6',
     fillStyle: 'solid', roughness: 0, roundness: { type: 2 }, strokeWidth: 1,
-    groupIds: [gid], customData: { nodeType: 'file_card_icon' },
+    groupIds: [gid], customData: { nodeType: 'file_card_header' },
   })
 
-  const iconText = mkText({
-    id: uid(), x: x + W / 2 - 16, y: y + 42, width: 32, height: 36,
-    text: '📎', originalText: '📎',
-    fontSize: 28, fontFamily: 2, textAlign: 'center', strokeColor: '#868e96',
-    groupIds: [gid], customData: { nodeType: 'file_card_icon_text' },
-  })
-
-  const label = mkText({
-    id: uid(), x: x + 8, y: y + H - 32, width: W - 16, height: 24,
-    text: '点击选择文件...', originalText: '点击选择文件...',
-    fontSize: 11, fontFamily: 2, textAlign: 'center', strokeColor: '#868e96',
+  const titleText = mkText({
+    id: uid(), x: x + 10, y: y + 6, width: W - 20, height: 18,
+    text: title, originalText: title,
+    fontSize: 12, fontFamily: 2, textAlign: 'left',
+    strokeColor: bound ? '#1971c2' : '#495057',
     groupIds: [gid], customData: { nodeType: 'file_card_label' },
   })
 
-  return [bg, iconArea, iconText, label]
+  const body = mkText({
+    id: uid(), x: x + 10, y: y + 36, width: W - 20, height: H - 44,
+    text: preview || (bound ? '（资源内容为空）' : '资源未绑定'),
+    originalText: preview || (bound ? '（资源内容为空）' : '资源未绑定'),
+    fontSize: 11, fontFamily: 2, textAlign: 'left',
+    strokeColor: bound ? '#495057' : '#adb5bd',
+    groupIds: [gid], customData: { nodeType: 'file_card_body' },
+  })
+
+  return [bg, headerBar, titleText, body]
+}
+
+/**
+ * Mutate an existing resource card (identified by its group id) so it shows
+ * the given resource's title + preview. Returns a new elements array with the
+ * patches applied — caller is responsible for `api.updateScene`.
+ */
+export function applyResourceToCard(
+  elements: CanvasEl[],
+  gid: string,
+  data: ResourceCardData,
+): CanvasEl[] {
+  const bound = !!data.resourceId
+  const title = data.title?.trim() || (bound ? '未命名资源' : '点击「选择资源」绑定…')
+  const preview = bound
+    ? (previewSnippet(data.preview || '') || '（资源内容为空）')
+    : '资源未绑定'
+
+  return elements.map(el => {
+    if (!el.groupIds?.includes(gid)) return el
+    const nt = el.customData?.nodeType
+    if (nt === 'file_card') {
+      return {
+        ...el,
+        backgroundColor: bound ? '#ffffff' : '#f8f9fa',
+        strokeColor: bound ? '#74c0fc' : '#ced4da',
+        customData: {
+          ...el.customData,
+          resourceId: data.resourceId ?? null,
+          kind: data.kind ?? null,
+        },
+        updated: Date.now(),
+      }
+    }
+    if (nt === 'file_card_header') {
+      return {
+        ...el,
+        backgroundColor: bound ? '#e7f5ff' : '#e9ecef',
+        strokeColor: bound ? '#74c0fc' : '#dee2e6',
+        updated: Date.now(),
+      }
+    }
+    if (nt === 'file_card_label') {
+      return { ...el, text: title, originalText: title, strokeColor: bound ? '#1971c2' : '#495057', updated: Date.now() }
+    }
+    if (nt === 'file_card_body') {
+      return { ...el, text: preview, originalText: preview, strokeColor: bound ? '#495057' : '#adb5bd', updated: Date.now() }
+    }
+    return el
+  })
 }
 
 // ── FRAME / ZONE ──────────────────────────────────────────────────────────────

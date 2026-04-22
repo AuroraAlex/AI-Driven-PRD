@@ -4,10 +4,12 @@
  * Floating right panel that appears when an element is selected.
  * Shows type-specific editing controls based on customData.nodeType.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useCanvasStore } from '../../store/canvasStore'
-import { STICKY_COLORS, type CanvasEl } from './nodeInsert'
-import { X, Trash2 } from 'lucide-react'
+import { STICKY_COLORS, applyResourceToCard, type CanvasEl } from './nodeInsert'
+import { resourcesApi, type ResourceBlock, type ResourceKind } from '../../api/client'
+import { X, Trash2, Eye, Search, FileText, FileType, Sparkles } from 'lucide-react'
 import clsx from 'clsx'
 
 type NodeType = string | undefined
@@ -33,8 +35,9 @@ function getRootNode(els: CanvasEl[], selectedId: string): CanvasEl | null {
   return el
 }
 
-export default function CanvasInspector() {
+export default function CanvasInspector({ projectId }: { projectId?: string }) {
   const { api, selectedElementId, setSelectedElementId } = useCanvasStore()
+  const setOpenResourceCardId = useCanvasStore(s => s.setOpenResourceCardId)
   const [, forceUpdate] = useState(0)
 
   useEffect(() => {
@@ -105,7 +108,7 @@ export default function CanvasInspector() {
           {nodeType === 'user_story' && '用户故事'}
           {nodeType === 'ai_card' && 'AI 卡片'}
           {nodeType === 'prd_card' && 'PRD 章节'}
-          {nodeType === 'file_card' && '文件卡'}
+          {nodeType === 'file_card' && '资源卡'}
           {nodeType === 'frame' && '分区框'}
           {nodeType === 'mm_root' && '思维导图根节点'}
           {nodeType === 'mm_node' && '思维导图节点'}
@@ -179,6 +182,39 @@ export default function CanvasInspector() {
           </button>
         )}
 
+        {/* ── Resource Card (file_card) ─────────────────────────── */}
+        {nodeType === 'file_card' && (
+          <ResourceCardControls
+            projectId={projectId}
+            cardEl={root}
+            onPick={(res) => {
+              const gid = root.groupIds?.[0]
+              if (!gid) return
+              const next = applyResourceToCard(allEls, gid, {
+                resourceId: res.id,
+                title: res.title,
+                preview: res.markdown_content || res.extracted_text || '',
+                kind: res.kind,
+              })
+              api!.updateScene({ elements: next as never[] })
+              forceUpdate(n => n + 1)
+            }}
+            onClear={() => {
+              const gid = root.groupIds?.[0]
+              if (!gid) return
+              const next = applyResourceToCard(allEls, gid, {
+                resourceId: null, title: null, preview: null, kind: null,
+              })
+              api!.updateScene({ elements: next as never[] })
+              forceUpdate(n => n + 1)
+            }}
+            onView={() => {
+              const gid = root.groupIds?.[0]
+              if (gid) setOpenResourceCardId(gid)
+            }}
+          />
+        )}
+
         {/* ── PRD card body ────────────────────────────────────────── */}
         {nodeType === 'prd_card' && (
           <label className="flex flex-col gap-1">
@@ -235,6 +271,149 @@ export default function CanvasInspector() {
           <Trash2 size={12} /> 删除元素
         </button>
       </div>
+    </div>
+  )
+}
+
+// ── Resource card picker ────────────────────────────────────────────────────
+
+const KIND_LABELS: Record<ResourceKind, string> = {
+  file: '文件',
+  document: '文档',
+  snippet: '片段',
+}
+
+const KIND_ICONS: Record<ResourceKind, typeof FileText> = {
+  file: FileType,
+  document: FileText,
+  snippet: Sparkles,
+}
+
+function ResourceCardControls({
+  projectId, cardEl, onPick, onClear, onView,
+}: {
+  projectId?: string
+  cardEl: CanvasEl
+  onPick: (res: ResourceBlock) => void
+  onClear: () => void
+  onView: () => void
+}) {
+  const resourceId = (cardEl.customData?.resourceId as string | undefined) ?? null
+  const [pickerOpen, setPickerOpen] = useState(!resourceId)
+  const [search, setSearch] = useState('')
+  const [kindFilter, setKindFilter] = useState<ResourceKind | 'all'>('all')
+
+  const { data: resources = [], isLoading } = useQuery({
+    queryKey: ['resources', projectId, 'inspector-picker'],
+    queryFn: () => resourcesApi.list(projectId!),
+    enabled: !!projectId && pickerOpen,
+    staleTime: 10_000,
+  })
+
+  const filtered = useMemo(() => {
+    return resources.filter(r => {
+      if (kindFilter !== 'all' && r.kind !== kindFilter) return false
+      if (search.trim()) {
+        const q = search.toLowerCase()
+        if (!r.title.toLowerCase().includes(q)
+          && !(r.summary || '').toLowerCase().includes(q)) return false
+      }
+      return true
+    })
+  }, [resources, kindFilter, search])
+
+  return (
+    <div className="flex flex-col gap-2">
+      {resourceId ? (
+        <>
+          <button
+            onClick={onView}
+            className="flex items-center justify-center gap-1 text-xs px-2 py-1.5 rounded-[var(--radius-sm)] bg-[var(--accent)] text-white hover:opacity-90"
+          >
+            <Eye size={12} /> 查看完整内容
+          </button>
+          <div className="flex gap-1.5">
+            <button
+              onClick={() => setPickerOpen(v => !v)}
+              className="flex-1 text-xs px-2 py-1 rounded-[var(--radius-sm)] border border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--accent-light)]"
+            >
+              {pickerOpen ? '收起' : '更换资源'}
+            </button>
+            <button
+              onClick={onClear}
+              className="text-xs px-2 py-1 rounded-[var(--radius-sm)] border border-[var(--border)] text-[var(--text-tertiary)] hover:text-[var(--warning)]"
+              title="解除绑定"
+            >
+              解绑
+            </button>
+          </div>
+        </>
+      ) : (
+        <div className="text-[11px] text-[var(--text-tertiary)]">
+          选择一个资源进行绑定（双击卡片可展开查看）。
+        </div>
+      )}
+
+      {pickerOpen && (
+        <div className="flex flex-col gap-1.5 border-t border-[var(--border)] pt-2">
+          <div className="flex items-center gap-1">
+            <Search size={11} className="text-[var(--text-tertiary)]" />
+            <input
+              autoFocus
+              placeholder="搜索资源…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="flex-1 text-xs bg-[var(--bg-base)] border border-[var(--border)] rounded px-1.5 py-1 focus:outline-none focus:border-[var(--accent)]"
+            />
+          </div>
+          <div className="flex gap-1 text-[10px]">
+            {(['all', 'file', 'document', 'snippet'] as const).map(k => (
+              <button
+                key={k}
+                onClick={() => setKindFilter(k)}
+                className={clsx(
+                  'px-1.5 py-0.5 rounded',
+                  kindFilter === k
+                    ? 'bg-[var(--accent)] text-white'
+                    : 'bg-[var(--bg-base)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)]',
+                )}
+              >
+                {k === 'all' ? '全部' : KIND_LABELS[k]}
+              </button>
+            ))}
+          </div>
+          <div className="max-h-56 overflow-y-auto flex flex-col gap-0.5 border border-[var(--border)] rounded bg-[var(--bg-base)]">
+            {isLoading && (
+              <div className="text-[11px] text-[var(--text-tertiary)] px-2 py-2">加载中…</div>
+            )}
+            {!isLoading && filtered.length === 0 && (
+              <div className="text-[11px] text-[var(--text-tertiary)] px-2 py-2">暂无资源</div>
+            )}
+            {filtered.map(r => {
+              const Icon = KIND_ICONS[r.kind]
+              const active = r.id === resourceId
+              return (
+                <button
+                  key={r.id}
+                  onClick={() => { onPick(r); setPickerOpen(false) }}
+                  className={clsx(
+                    'flex items-start gap-1.5 px-2 py-1.5 text-left text-[11px] hover:bg-[var(--accent-light)]',
+                    active && 'bg-[var(--accent-light)]',
+                  )}
+                >
+                  <Icon size={11} className="mt-0.5 text-[var(--text-tertiary)] shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="truncate text-[var(--text-primary)]">{r.title}</div>
+                    {r.summary && (
+                      <div className="truncate text-[10px] text-[var(--text-tertiary)]">{r.summary}</div>
+                    )}
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

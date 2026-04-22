@@ -303,6 +303,106 @@ async def export_message(
     )
 
 
+# ── Batch export (multi-select messages → single document) ─────────────────
+
+
+class BatchExportRequest(BaseModel):
+    message_ids: list[str]
+    title: str | None = None
+    include_role_labels: bool = True
+
+
+class BatchExportResponse(BaseModel):
+    resource_id: str
+    title: str
+    message_count: int
+
+
+@router.post("/messages/export-batch", response_model=BatchExportResponse)
+async def export_messages_batch(
+    project_id: str,
+    session_id: str,
+    body: BatchExportRequest,
+    deps: Annotated[AppDeps, Depends(get_deps)],
+):
+    """Export multiple chat messages as a single Markdown document resource.
+
+    Messages are concatenated in the order they appear in the session
+    (chronological, not request order) so the resulting document reads
+    naturally regardless of how the user clicked.
+    """
+    from infra.models import Reference
+
+    await _ensure_session(deps, project_id, session_id)
+    if not body.message_ids:
+        raise HTTPException(400, "message_ids is empty")
+
+    res = await deps.db.execute(
+        select(ChatMessage)
+        .where(
+            ChatMessage.chat_session_id == session_id,
+            ChatMessage.id.in_(body.message_ids),
+        )
+        .order_by(ChatMessage.created_at)
+    )
+    msgs = res.scalars().all()
+    if not msgs:
+        raise HTTPException(404, "No messages found")
+
+    parts: list[str] = []
+    for m in msgs:
+        body_text = (m.content or "").strip()
+        if not body_text:
+            continue
+        if body.include_role_labels:
+            label = "用户" if m.role == "user" else "AI 助手"
+            parts.append(f"### {label}\n\n{body_text}")
+        else:
+            parts.append(body_text)
+    markdown = "\n\n---\n\n".join(parts).strip()
+    if not markdown:
+        raise HTTPException(400, "All selected messages are empty")
+
+    summary = _summary_from_md(markdown)
+    title = (body.title or f"Chat 导出 · {len(msgs)} 条消息").strip()[:200]
+
+    rb = ResourceBlock(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        kind="document",
+        title=title,
+        summary=summary,
+        markdown_content=markdown,
+        origin_type="chat_message",
+        origin_ref=json.dumps({
+            "chat_session_id": session_id,
+            "message_ids": [m.id for m in msgs],
+            "is_batch": True,
+        }),
+    )
+    deps.db.add(rb)
+    await deps.db.flush()
+
+    for m in msgs:
+        deps.db.add(Reference(
+            id=str(uuid.uuid4()),
+            project_id=project_id,
+            source_type="chat_message",
+            source_id=m.id,
+            source_session_id=session_id,
+            target_type="resource_block",
+            target_id=rb.id,
+            relation="derived_from",
+            created_by="user",
+        ))
+
+    return BatchExportResponse(
+        resource_id=rb.id,
+        title=title,
+        message_count=len(msgs),
+    )
+
+
 # ── Internal helpers ────────────────────────────────────────────────────────
 
 

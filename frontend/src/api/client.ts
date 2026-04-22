@@ -334,6 +334,16 @@ export const chatApi = {
       `/projects/${projectId}/chat-sessions/${sessionId}/messages/${messageId}/export`,
       body,
     ).then(r => r.data),
+  /** Export multiple chat messages as a single Markdown document resource. */
+  exportMessagesBatch: (
+    projectId: string,
+    sessionId: string,
+    body: { message_ids: string[]; title?: string; include_role_labels?: boolean },
+  ) =>
+    http.post<{ resource_id: string; title: string; message_count: number }>(
+      `/projects/${projectId}/chat-sessions/${sessionId}/messages/export-batch`,
+      body,
+    ).then(r => r.data),
 }
 
 // ── References ────────────────────────────────────────────────────────────

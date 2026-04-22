@@ -164,7 +164,7 @@ export default function ExcalidrawCanvas({ projectId, canvasSessionId }: Props) 
     useCanvasStore.getState().setSelectedElementId(next)
   }, [excalidrawAPI])
 
-  // Double-click on an AI card → open editor modal
+  // Double-click on an AI card → open editor; on a resource card → open viewer
   const handleDoubleClick = useCallback(() => {
     if (!excalidrawAPI) return
     const appState = excalidrawAPI.getAppState()
@@ -175,22 +175,28 @@ export default function ExcalidrawCanvas({ projectId, canvasSessionId }: Props) 
       const el = elements.find((e: { id: string }) => e.id === elId) as Record<string, unknown> | undefined
       if (!el) continue
       const cd = (el.customData as Record<string, unknown>) || {}
+      const groupIds = (el.groupIds as string[] | undefined) || []
       if (cd.nodeType === 'ai_card') {
-        const groupIds = (el.groupIds as string[] | undefined) || []
         const cardId = groupIds[0] || (el.id as string)
         useCanvasStore.getState().setOpenAICardId(cardId)
         return
       }
-      // If the user double-clicked a child of an AI card group, walk groupIds
-      const gids = (el.groupIds as string[] | undefined) || []
-      for (const gid of gids) {
+      if (cd.nodeType === 'file_card') {
+        const cardId = groupIds[0] || (el.id as string)
+        useCanvasStore.getState().setOpenResourceCardId(cardId)
+        return
+      }
+      // If the user double-clicked a child of a card group, walk groupIds
+      for (const gid of groupIds) {
         const root = elements.find((e: unknown) => {
           const ecd = ((e as Record<string, unknown>).customData as Record<string, unknown>) || {}
           const egids = ((e as Record<string, unknown>).groupIds as string[] | undefined) || []
-          return ecd.nodeType === 'ai_card' && egids[0] === gid
-        })
+          return egids[0] === gid && (ecd.nodeType === 'ai_card' || ecd.nodeType === 'file_card')
+        }) as Record<string, unknown> | undefined
         if (root) {
-          useCanvasStore.getState().setOpenAICardId(gid)
+          const rootType = ((root.customData as Record<string, unknown>) || {}).nodeType
+          if (rootType === 'ai_card') useCanvasStore.getState().setOpenAICardId(gid)
+          else if (rootType === 'file_card') useCanvasStore.getState().setOpenResourceCardId(gid)
           return
         }
       }

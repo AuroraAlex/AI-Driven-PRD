@@ -9,6 +9,7 @@ import CanvasInspector from '../components/canvas/CanvasInspector'
 import CanvasMinimap from '../components/canvas/CanvasMinimap'
 import CanvasTemplateModal from '../components/canvas/CanvasTemplateModal'
 import AICardEditor from '../components/canvas/AICardEditor'
+import ResourceCardViewer from '../components/canvas/ResourceCardViewer'
 import ChatPanel from '../components/chat/ChatPanel'
 import ResourcePanel from '../components/resources/ResourcePanel'
 import TemplateModal from '../components/prd/TemplateModal'
@@ -108,10 +109,11 @@ export default function Workspace() {
             {canvasSessionId ? (
               <>
                 <ExcalidrawCanvas projectId={projectId} canvasSessionId={canvasSessionId} />
-                <CanvasInspector />
+                <CanvasInspector projectId={projectId} />
                 <CanvasMinimap />
                 <CanvasTemplateModal />
                 <AICardEditor projectId={projectId} canvasSessionId={canvasSessionId} />
+                <ResourceCardViewer projectId={projectId} />
               </>
             ) : (
               <div className="h-full flex items-center justify-center text-[var(--text-tertiary)] text-sm">

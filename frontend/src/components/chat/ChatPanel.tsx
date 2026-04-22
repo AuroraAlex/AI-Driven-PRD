@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Send, Bot, User, Settings, Database, LayoutTemplate,
   Square, RotateCcw, Pencil, Trash2, Copy, Check, ChevronDown, ChevronRight, ChevronUp, Sliders,
-  LayoutPanelLeft, FileText,
+  LayoutPanelLeft, FileText, CheckSquare, X,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { canvasApi, canvasSessionsApi, chatApi, settingsApi, type ChatMessage, type ChatMessageMeta } from '../../api/client'
@@ -53,6 +53,8 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
   const [editTarget, setEditTarget] = useState<{ id: string; content: string } | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [configOpen, setConfigOpen] = useState(false)
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const bottomRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const qc = useQueryClient()
@@ -97,6 +99,58 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
         elements: [...canvasApiHandle.getSceneElements(), ...els] as never[],
       })
       toast.success('已插入到画布')
+    } catch (err) {
+      toast.error(`导出失败：${(err as Error).message}`)
+    }
+  }
+
+  function toggleSelectMode() {
+    setSelectMode(v => {
+      if (v) setSelectedIds(new Set())
+      return !v
+    })
+  }
+
+  function toggleSelected(id: string) {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  function selectAll() {
+    setSelectedIds(new Set(messages.filter(m => !m.id.startsWith('__')).map(m => m.id)))
+  }
+
+  async function handleBatchExport() {
+    const ids = Array.from(selectedIds).filter(id => !id.startsWith('__'))
+    if (ids.length === 0) {
+      toast.error('请先选择要导出的消息')
+      return
+    }
+    try {
+      const res = await chatApi.exportMessagesBatch(projectId, chatSessionId, {
+        message_ids: ids,
+        include_role_labels: true,
+      })
+      qc.invalidateQueries({ queryKey: ['resources', projectId] })
+      setSelectMode(false)
+      setSelectedIds(new Set())
+      toast.success(
+        (t) => (
+          <div className="flex items-center gap-2">
+            已导出 {res.message_count} 条消息为文档
+            <button
+              className="text-[var(--accent)] underline"
+              onClick={() => {
+                toast.dismiss(t.id)
+                navigate(`/projects/${projectId}/docs/${res.resource_id}`)
+              }}
+            >打开</button>
+          </div>
+        ),
+      )
     } catch (err) {
       toast.error(`导出失败：${(err as Error).message}`)
     }
@@ -670,6 +724,48 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
         )}
       </div>
 
+      {/* Select-mode toolbar */}
+      <div className="px-4 py-1.5 border-b border-[var(--border)] shrink-0 flex items-center gap-2 text-xs">
+        {selectMode ? (
+          <>
+            <span className="text-[var(--text-secondary)]">已选 {selectedIds.size} 条</span>
+            <button
+              onClick={selectAll}
+              className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
+            >全选</button>
+            <button
+              onClick={() => setSelectedIds(new Set())}
+              className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
+              disabled={selectedIds.size === 0}
+            >清空</button>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                onClick={handleBatchExport}
+                disabled={selectedIds.size === 0}
+                className="flex items-center gap-1 px-2 py-1 rounded bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-40"
+              >
+                <FileText size={12} /> 导出为文档
+              </button>
+              <button
+                onClick={toggleSelectMode}
+                title="退出多选"
+                className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          </>
+        ) : (
+          <button
+            onClick={toggleSelectMode}
+            className="ml-auto flex items-center gap-1 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
+            title="多选消息后批量导出为文档"
+          >
+            <CheckSquare size={12} /> 多选导出
+          </button>
+        )}
+      </div>
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-3">
         {messages.length === 0 && !streamBuffer && (
@@ -688,6 +784,9 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
             onDelete={() => handleDelete(m.id)}
             onExportCanvas={() => handleExportToCanvas(m)}
             onExportDocument={() => handleExportToDocument(m)}
+            selectMode={selectMode}
+            selected={selectedIds.has(m.id)}
+            onToggleSelected={() => toggleSelected(m.id)}
           />
         ))}
         {streaming && (
@@ -737,6 +836,7 @@ function MessageBubble({
   message, streaming = false,
   canRegenerate, onRegenerate, onEdit, onDelete,
   onExportCanvas, onExportDocument,
+  selectMode = false, selected = false, onToggleSelected,
 }: {
   message: ChatMessage
   streaming?: boolean
@@ -746,6 +846,9 @@ function MessageBubble({
   onDelete?: () => void
   onExportCanvas?: () => void
   onExportDocument?: () => void
+  selectMode?: boolean
+  selected?: boolean
+  onToggleSelected?: () => void
 }) {
   const isUser = message.role === 'user'
   const [copied, setCopied] = useState(false)
@@ -760,7 +863,24 @@ function MessageBubble({
   }
 
   return (
-    <div className={clsx('group flex gap-2 items-start', isUser && 'flex-row-reverse')}>
+    <div
+      className={clsx(
+        'group flex gap-2 items-start',
+        isUser && 'flex-row-reverse',
+        selectMode && !message.id.startsWith('__') && 'cursor-pointer rounded px-1 -mx-1',
+        selectMode && selected && 'bg-[var(--accent-light)]',
+      )}
+      onClick={selectMode && !message.id.startsWith('__') ? onToggleSelected : undefined}
+    >
+      {selectMode && !message.id.startsWith('__') && (
+        <input
+          type="checkbox"
+          className="mt-2 accent-[var(--accent)] shrink-0"
+          checked={selected}
+          onChange={onToggleSelected}
+          onClick={e => e.stopPropagation()}
+        />
+      )}
       <div className={clsx(
         'w-6 h-6 rounded-full flex items-center justify-center shrink-0 mt-0.5',
         isUser ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-surface)] border border-[var(--border)] text-[var(--text-secondary)]',
