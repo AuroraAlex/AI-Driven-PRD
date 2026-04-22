@@ -6,18 +6,19 @@
     Arial, sans-serif;
   --font-mono: "SF Mono", "Menlo", "Cascadia Code", monospace;
 
-  /* Palette */
-  --accent: #5b5bd6;
-  --accent-hover: #4b4bc6;
-  --accent-light: rgba(91, 91, 214, 0.12);
-  --success: #30a46c;
-  --warning: #f76b15;
-  --error: #e5484d;
+  /* Palette — neutral + forest green accent (NotebookLM-inspired) */
+  --accent: #2f6f4e;
+  --accent-hover: #26593f;
+  --accent-light: rgba(58, 138, 99, 0.12);
+  --accent-soft: #e7f1ec;
+  --success: #2f7a55;
+  --warning: #b45309;
+  --error: #c0413a;
 
   /* Backgrounds */
-  --bg-base: #f5f5f7;
+  --bg-base: #f6f7f6;
   --bg-surface: #ffffff;
-  --bg-glass: rgba(255, 255, 255, 0.72);
+  --bg-glass: rgba(255, 255, 255, 0.78);
   --bg-overlay: rgba(0, 0, 0, 0.4);
 
   /* Borders */
@@ -47,14 +48,18 @@
 /* Dark mode */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg-base: #1c1c1e;
-    --bg-surface: #2c2c2e;
-    --bg-glass: rgba(28, 28, 30, 0.72);
+    --bg-base: #161816;
+    --bg-surface: #1f221f;
+    --bg-glass: rgba(31, 34, 31, 0.78);
     --border: rgba(255, 255, 255, 0.08);
     --border-strong: rgba(255, 255, 255, 0.16);
-    --text-primary: #f5f5f7;
-    --text-secondary: #aeaeb2;
-    --text-tertiary: #636366;
+    --text-primary: #ecedea;
+    --text-secondary: #a8aea4;
+    --text-tertiary: #6a6f66;
+    --accent: #4f9a72;
+    --accent-hover: #6cb38b;
+    --accent-light: rgba(79, 154, 114, 0.18);
+    --accent-soft: rgba(79, 154, 114, 0.10);
   }
 }
 

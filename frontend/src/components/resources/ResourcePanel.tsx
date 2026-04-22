@@ -54,9 +54,23 @@ const STATUS_CLASS: Record<ResourceRagStatus, string> = {
 
 interface Props {
   projectId: string
+  /**
+   * Optional callback fired when the user clicks an editable resource.
+   * When provided, this overrides the default navigation-to-editor behavior.
+   * Used by the workspace shell to bind clicks to the center Markdown face.
+   */
+  onSelectResource?: (r: ResourceBlock) => void
+  /**
+   * Stable id assigned to the hidden file input. Lets external callers
+   * (e.g. the empty-state "upload" button on the Markdown face) trigger
+   * the upload dialog via document.getElementById.
+   */
+  uploadInputId?: string
+  /** Highlight the row whose id matches this value. */
+  activeResourceId?: string | null
 }
 
-export default function ResourcePanel({ projectId }: Props) {
+export default function ResourcePanel({ projectId, onSelectResource, uploadInputId, activeResourceId }: Props) {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const inputRef = useRef<HTMLInputElement>(null)
@@ -116,16 +130,16 @@ export default function ResourcePanel({ projectId }: Props) {
       markdown_content: '# 未命名文档\n\n',
     })
     qc.invalidateQueries({ queryKey: ['resources', projectId] })
-    navigate(`/projects/${projectId}/docs/${r.id}`)
+    if (onSelectResource) onSelectResource(r)
+    else navigate(`/projects/${projectId}/docs/${r.id}`)
   }
 
   async function openItem(r: ResourceBlock) {
-    if (r.kind === 'file') {
-      // For files, just open document editor in read-only-ish mode (preview of extracted text)
-      navigate(`/projects/${projectId}/docs/${r.id}`)
-    } else {
-      navigate(`/projects/${projectId}/docs/${r.id}`)
+    if (r.kind !== 'file' && onSelectResource) {
+      onSelectResource(r)
+      return
     }
+    navigate(`/projects/${projectId}/docs/${r.id}`)
   }
 
   return (
@@ -149,6 +163,7 @@ export default function ResourcePanel({ projectId }: Props) {
         </div>
         <input
           ref={inputRef}
+          id={uploadInputId}
           type="file"
           className="hidden"
           multiple
@@ -198,7 +213,12 @@ export default function ResourcePanel({ projectId }: Props) {
             {filtered.map(r => (
               <li
                 key={r.id}
-                className="flex items-center gap-2 px-3 py-2 group hover:bg-[var(--accent-light)] transition-colors"
+                className={clsx(
+                  'flex items-center gap-2 px-3 py-2 group transition-colors',
+                  activeResourceId === r.id
+                    ? 'bg-[var(--accent-light)]'
+                    : 'hover:bg-[var(--accent-light)]',
+                )}
               >
                 <span className="text-[var(--text-secondary)]">
                   {fileIcon(r.kind, r.file_type)}

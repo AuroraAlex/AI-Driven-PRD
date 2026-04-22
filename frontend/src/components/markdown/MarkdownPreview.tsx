@@ -12,25 +12,24 @@
  * attributes (offsets into the source markdown) so callers can map a DOM
  * Range back to the original markdown substring.
  */
-import { useEffect, useRef, useState, memo, type ReactNode } from 'react'
+import { useEffect, useState, memo, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import mermaid from 'mermaid'
 import 'katex/dist/katex.min.css'
+import { useDarkMode } from '../../hooks/useDarkMode'
 
-let mermaidInitialized = false
-function ensureMermaid() {
-  if (mermaidInitialized) return
-  mermaidInitialized = true
-  const isDark =
-    typeof document !== 'undefined' &&
-    document.documentElement.classList.contains('dark')
+let currentMermaidTheme: 'dark' | 'default' | null = null
+function syncMermaidTheme(isDark: boolean) {
+  const next = isDark ? 'dark' : 'default'
+  if (currentMermaidTheme === next) return
+  currentMermaidTheme = next
   mermaid.initialize({
     startOnLoad: false,
     securityLevel: 'strict',
-    theme: isDark ? 'dark' : 'default',
+    theme: next,
     fontFamily: 'inherit',
   })
 }
@@ -38,10 +37,11 @@ function ensureMermaid() {
 function MermaidBlock({ code }: { code: string }) {
   const [error, setError] = useState<string | null>(null)
   const [svg, setSvg] = useState<string>('')
+  const isDark = useDarkMode()
 
   useEffect(() => {
     let cancelled = false
-    ensureMermaid()
+    syncMermaidTheme(isDark)
     const trimmed = code.trim()
     if (!trimmed) {
       setSvg('')
@@ -81,7 +81,7 @@ function MermaidBlock({ code }: { code: string }) {
     return () => {
       cancelled = true
     }
-  }, [code])
+  }, [code, isDark])
 
   if (error) {
     return (

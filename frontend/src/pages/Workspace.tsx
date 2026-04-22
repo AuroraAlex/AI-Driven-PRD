@@ -1,29 +1,17 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, LayoutPanelLeft, MessageSquare, FileText, Files, Database } from 'lucide-react'
+import { ArrowLeft, Database, FileText } from 'lucide-react'
 import { projectsApi } from '../api/client'
-import ExcalidrawCanvas from '../components/canvas/ExcalidrawCanvas'
-import CanvasToolbar from '../components/canvas/CanvasToolbar'
-import CanvasInspector from '../components/canvas/CanvasInspector'
-import CanvasMinimap from '../components/canvas/CanvasMinimap'
-import CanvasTemplateModal from '../components/canvas/CanvasTemplateModal'
-import AICardEditor from '../components/canvas/AICardEditor'
-import ResourceCardViewer from '../components/canvas/ResourceCardViewer'
-import ChatPanel from '../components/chat/ChatPanel'
-import ResourcePanel from '../components/resources/ResourcePanel'
-import TemplateModal from '../components/prd/TemplateModal'
-import SessionSwitcher from '../components/workspace/SessionSwitcher'
-import KnowledgePanel from '../components/workspace/KnowledgePanel'
+import WorkspaceShell from '../components/workspace/WorkspaceShell'
+import KnowledgeModal from '../components/workspace/KnowledgeModal'
 import { useSessionStore } from '../store/sessionStore'
 import { useCanvasStore } from '../store/canvasStore'
-
-type PanelId = 'canvas' | 'resources' | 'prd' | 'knowledge'
 
 export default function Workspace() {
   const { projectId } = useParams<{ projectId: string }>()
   const navigate = useNavigate()
-  const [leftPanel, setLeftPanel] = useState<PanelId>('canvas')
+  const [showKnowledge, setShowKnowledge] = useState(false)
 
   const sessionStore = useSessionStore()
   const setCurrentCanvasSessionId = useCanvasStore(s => s.setCurrentCanvasSessionId)
@@ -44,104 +32,48 @@ export default function Workspace() {
 
   return (
     <div className="flex flex-col h-screen bg-[var(--bg-base)] overflow-hidden">
-      {/* Top bar */}
+      {/* Top bar — only 知识库 + PRD remain */}
       <header className="glass h-11 flex items-center gap-3 px-4 border-b border-[var(--border)] shrink-0 z-10">
         <button
           className="text-[var(--text-secondary)] hover:text-[var(--accent)] transition-colors"
           onClick={() => navigate('/')}
+          title="返回首页"
         >
           <ArrowLeft size={16} />
         </button>
         <span className="font-semibold text-sm text-[var(--text-primary)] truncate">
           {project?.name ?? '…'}
         </span>
-        <div className="flex items-center gap-1 ml-2">
-          {[
-            { id: 'canvas' as PanelId, icon: <LayoutPanelLeft size={14} />, label: 'Canvas' },
-            { id: 'resources' as PanelId, icon: <Files size={14} />, label: 'Resources' },
-            { id: 'prd' as PanelId, icon: <FileText size={14} />, label: 'PRD' },
-            { id: 'knowledge' as PanelId, icon: <Database size={14} />, label: 'Knowledge' },
-          ].map(tab => (
-            <button
-              key={tab.id}
-              onClick={() => setLeftPanel(tab.id)}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-[var(--radius-sm)] text-xs font-medium transition-colors ${
-                leftPanel === tab.id
-                  ? 'bg-[var(--accent)] text-white'
-                  : 'text-[var(--text-secondary)] hover:bg-[var(--accent-light)]'
-              }`}
-            >
-              {tab.icon}
-              {tab.label}
-            </button>
-          ))}
+        <div className="flex items-center gap-1 ml-auto">
+          <button
+            onClick={() => setShowKnowledge(true)}
+            className="flex items-center gap-1.5 px-3 py-1 rounded-[var(--radius-sm)] text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--accent-light)] hover:text-[var(--accent)] transition-colors"
+          >
+            <Database size={14} />
+            知识库
+          </button>
+          <button
+            onClick={() => navigate(`/projects/${projectId}/overview`)}
+            className="flex items-center gap-1.5 px-3 py-1 rounded-[var(--radius-sm)] text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--accent-light)] hover:text-[var(--accent)] transition-colors"
+          >
+            <FileText size={14} />
+            PRD
+          </button>
         </div>
       </header>
 
-      {/* Main layout */}
-      {leftPanel === 'knowledge' ? (
-        <div className="flex-1 overflow-hidden">
-          <KnowledgePanel projectId={projectId} />
-        </div>
-      ) : (
-        <div className="flex flex-1 overflow-hidden">
-          {/* Left panel */}
-          <div className="w-64 flex flex-col border-r border-[var(--border)] bg-[var(--bg-surface)] shrink-0 overflow-hidden">
-            {leftPanel === 'canvas' && (
-              <>
-                <div className="px-3 py-2 border-b border-[var(--border)]">
-                  <SessionSwitcher projectId={projectId} kind="canvas" />
-                </div>
-                {canvasSessionId && <CanvasToolbar projectId={projectId} canvasSessionId={canvasSessionId} />}
-              </>
-            )}
-            {leftPanel === 'resources' && <ResourcePanel projectId={projectId} />}
-            {leftPanel === 'prd' && (
-              <TemplateModal
-                projectId={projectId}
-                onOpen={prd => navigate(`/projects/${projectId}/docs/${prd.id}`)}
-              />
-            )}
-          </div>
+      {/* Main 3-column resizable shell */}
+      <div className="flex-1 min-h-0 overflow-hidden">
+        <WorkspaceShell
+          projectId={projectId}
+          canvasSessionId={canvasSessionId}
+          chatSessionId={chatSessionId}
+        />
+      </div>
 
-          {/* Center: Canvas */}
-          <div className="flex-1 overflow-hidden relative">
-            {canvasSessionId ? (
-              <>
-                <ExcalidrawCanvas projectId={projectId} canvasSessionId={canvasSessionId} />
-                <CanvasInspector projectId={projectId} />
-                <CanvasMinimap />
-                <CanvasTemplateModal />
-                <AICardEditor projectId={projectId} canvasSessionId={canvasSessionId} />
-                <ResourceCardViewer projectId={projectId} />
-              </>
-            ) : (
-              <div className="h-full flex items-center justify-center text-[var(--text-tertiary)] text-sm">
-                正在准备画布会话…
-              </div>
-            )}
-          </div>
-
-          {/* Right panel: Chat */}
-          <div className="w-80 flex flex-col border-l border-[var(--border)] bg-[var(--bg-surface)] shrink-0">
-            <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--border)] shrink-0">
-              <MessageSquare size={14} className="text-[var(--accent)]" />
-              <span className="text-sm font-semibold text-[var(--text-primary)]">AI Chat</span>
-              <div className="ml-auto">
-                <SessionSwitcher projectId={projectId} kind="chat" />
-              </div>
-            </div>
-            {chatSessionId ? (
-              <ChatPanel projectId={projectId} chatSessionId={chatSessionId} currentCanvasSessionId={canvasSessionId} />
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-xs text-[var(--text-tertiary)]">
-                正在准备对话会话…
-              </div>
-            )}
-          </div>
-        </div>
+      {showKnowledge && (
+        <KnowledgeModal projectId={projectId} onClose={() => setShowKnowledge(false)} />
       )}
     </div>
   )
 }
-

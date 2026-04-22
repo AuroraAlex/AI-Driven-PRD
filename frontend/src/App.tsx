@@ -4,6 +4,7 @@ import { Toaster } from 'react-hot-toast'
 import Home from './pages/Home'
 import Workspace from './pages/Workspace'
 import DocumentEditor from './pages/DocumentEditor'
+import ProjectOverview from './pages/ProjectOverview'
 
 const qc = new QueryClient({
   defaultOptions: {
@@ -18,6 +19,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/workspace/:projectId" element={<Workspace />} />
+          <Route path="/projects/:projectId/overview" element={<ProjectOverview />} />
           <Route path="/projects/:projectId/docs/:resourceId" element={<DocumentEditor />} />
         </Routes>
       </BrowserRouter>

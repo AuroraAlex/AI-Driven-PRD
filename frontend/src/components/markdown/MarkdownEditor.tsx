@@ -5,8 +5,9 @@
  * Toolbar inserts standard Markdown snippets at the cursor.
  * Calls `onChange` on every edit; the parent owns debounce/save logic.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { EditorState } from '@codemirror/state'
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import type { ForwardRefRenderFunction } from 'react'
+import { Compartment, EditorState, type Extension } from '@codemirror/state'
 import {
   EditorView, keymap, lineNumbers, highlightActiveLine,
   drawSelection, rectangularSelection,
@@ -14,12 +15,14 @@ import {
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { syntaxHighlighting, defaultHighlightStyle, indentOnInput, bracketMatching } from '@codemirror/language'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
+import { oneDark, oneDarkHighlightStyle } from '@codemirror/theme-one-dark'
 import {
   Bold, Italic, Heading1, Heading2, Heading3, List, ListOrdered, Link2,
   Code as CodeIcon, Quote, Table as TableIcon, Image as ImageIcon, Sigma,
   Workflow, Eye, FileText, Columns,
 } from 'lucide-react'
 import MarkdownPreview from './MarkdownPreview'
+import { useDarkMode } from '../../hooks/useDarkMode'
 
 type Mode = 'edit' | 'split' | 'preview'
 
@@ -95,13 +98,46 @@ function applySnippet(view: EditorView, s: Snippet) {
   view.focus()
 }
 
-export default function MarkdownEditor({
+export interface MarkdownEditorHandle {
+  getValue: () => string
+  insertAtCursor: (text: string) => void
+  scrollToLine: (line: number) => void
+}
+
+const MarkdownEditorImpl: ForwardRefRenderFunction<MarkdownEditorHandle, Props> = ({
   value, onChange, placeholder, mode: modeProp, onModeChange, className,
-}: Props) {
+}, ref) => {
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
+  const themeCompartment = useRef(new Compartment())
+  const isDark = useDarkMode()
   const onChangeRef = useRef(onChange)
   onChangeRef.current = onChange
+
+  useImperativeHandle(ref, () => ({
+    getValue: () => viewRef.current?.state.doc.toString() ?? '',
+    insertAtCursor: (text: string) => {
+      const view = viewRef.current
+      if (!view) return
+      const sel = view.state.selection.main
+      view.dispatch({
+        changes: { from: sel.from, to: sel.to, insert: text },
+        selection: { anchor: sel.from + text.length },
+      })
+      view.focus()
+    },
+    scrollToLine: (line: number) => {
+      const view = viewRef.current
+      if (!view) return
+      const safe = Math.max(1, Math.min(line, view.state.doc.lines))
+      const pos = view.state.doc.line(safe).from
+      view.dispatch({
+        selection: { anchor: pos },
+        effects: EditorView.scrollIntoView(pos, { y: 'start', yMargin: 24 }),
+      })
+      view.focus()
+    },
+  }), [])
 
   const [internalMode, setInternalMode] = useState<Mode>('split')
   const mode = modeProp ?? internalMode
@@ -113,6 +149,9 @@ export default function MarkdownEditor({
   // Initialize CodeMirror once
   useEffect(() => {
     if (!hostRef.current || viewRef.current) return
+    const themeExt: Extension = isDark
+      ? [oneDark, syntaxHighlighting(oneDarkHighlightStyle)]
+      : [syntaxHighlighting(defaultHighlightStyle, { fallback: true })]
     const state = EditorState.create({
       doc: value,
       extensions: [
@@ -123,7 +162,6 @@ export default function MarkdownEditor({
         rectangularSelection(),
         indentOnInput(),
         bracketMatching(),
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         markdown({ base: markdownLanguage }),
         keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
         EditorView.lineWrapping,
@@ -132,8 +170,9 @@ export default function MarkdownEditor({
             onChangeRef.current(u.state.doc.toString())
           }
         }),
+        themeCompartment.current.of(themeExt),
         EditorView.theme({
-          '&': { height: '100%', fontSize: '13px' },
+          '&': { height: '100%', fontSize: '13px', backgroundColor: 'transparent' },
           '.cm-scroller': { fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace', overflow: 'auto' },
           '.cm-content': { padding: '12px 0' },
         }),
@@ -147,6 +186,16 @@ export default function MarkdownEditor({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Swap CodeMirror theme reactively when the OS / app theme flips.
+  useEffect(() => {
+    const view = viewRef.current
+    if (!view) return
+    const themeExt: Extension = isDark
+      ? [oneDark, syntaxHighlighting(oneDarkHighlightStyle)]
+      : [syntaxHighlighting(defaultHighlightStyle, { fallback: true })]
+    view.dispatch({ effects: themeCompartment.current.reconfigure(themeExt) })
+  }, [isDark])
 
   // Sync external value changes (e.g. when switching documents)
   useEffect(() => {
@@ -230,7 +279,7 @@ export default function MarkdownEditor({
         {/* Editor host stays mounted across mode switches so CodeMirror keeps its DOM. */}
         <div
           ref={hostRef}
-          className={`overflow-hidden bg-white ${
+          className={`overflow-hidden bg-[var(--bg-surface)] ${
             mode === 'preview'
               ? 'hidden'
               : mode === 'split'
@@ -251,3 +300,6 @@ export default function MarkdownEditor({
     </div>
   )
 }
+
+const MarkdownEditor = forwardRef(MarkdownEditorImpl)
+export default MarkdownEditor

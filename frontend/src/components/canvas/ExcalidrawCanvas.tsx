@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types/types'
 import { canvasApi } from '../../api/client'
 import { useCanvasStore } from '../../store/canvasStore'
+import { useDarkMode } from '../../hooks/useDarkMode'
 import {
   createStickyNote,
   createUserStoryCard,
@@ -53,6 +54,7 @@ function toSceneCoords(
 
 export default function ExcalidrawCanvas({ projectId, canvasSessionId }: Props) {
   const Excalidraw = useExcalidraw()
+  const isDark = useDarkMode()
   const [excalidrawAPI, setExcalidrawAPI] = useState<ExcalidrawImperativeAPI | null>(null)
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle')
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -295,7 +297,8 @@ export default function ExcalidrawCanvas({ projectId, canvasSessionId }: Props) 
         excalidrawAPI={handleApi}
         onChange={handleChange}
         langCode="zh-CN"
-        UIOptions={{ canvasActions: { saveToActiveFile: false, loadScene: false } }}
+        theme={isDark ? 'dark' : 'light'}
+        UIOptions={{ canvasActions: { saveToActiveFile: false, loadScene: false, toggleTheme: false } }}
       />
       {saveStatus !== 'idle' && (
         <div
