@@ -1,84 +1,151 @@
 /**
- * KnowledgePanel.tsx — Workspace tab listing every RAG-indexed source
- * (file / canvas / chat / prd) with status, sync triggers and reset.
+ * KnowledgePanel.tsx — dual-pane knowledge base browser.
+ *
+ * Left  : 未入库资源（user 手动选择加入）
+ * Right : 已入库资源（user 可移出 KB）
+ *
+ * Click a resource on either side to open it (document/snippet) or to inspect
+ * (file). The chevron button toggles `is_in_kb` via the resources API; the
+ * backend syncs the underlying RAG index.
+ *
+ * The panel still exposes legacy "全部重建" / "重置图谱" controls for the
+ * project-wide knowledge graph.
  */
-import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { RefreshCcw, Trash2, Database, Loader2 } from 'lucide-react'
-import clsx from 'clsx'
+import { useMemo } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  canvasSessionsApi,
-  chatSessionsApi,
-  knowledgeApi,
-  type RAGSource,
+  Database, Trash2, RefreshCcw, Loader2, FileText, Image as ImageIcon, File,
+  StickyNote, ChevronRight, ChevronLeft,
+} from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import {
+  resourcesApi, knowledgeApi,
+  type ResourceBlock, type ResourceKind, type ResourceRagStatus,
 } from '../../api/client'
-import { Button } from '../ui'
 
 interface Props {
   projectId: string
 }
 
-const STATUS_COLOR: Record<string, string> = {
-  indexed: 'text-[var(--success)]',
-  indexing: 'text-[var(--accent)]',
-  pending: 'text-[var(--text-tertiary)]',
-  failed: 'text-[var(--warning)]',
-  unindexed: 'text-[var(--text-tertiary)]',
+const STATUS_LABEL: Record<ResourceRagStatus, string> = {
+  unindexed: '未入库',
+  pending: '排队中',
+  indexing: '索引中',
+  indexed: '已入库',
+  failed: '失败',
 }
 
-const SOURCE_LABEL: Record<string, string> = {
+const STATUS_CLASS: Record<ResourceRagStatus, string> = {
+  unindexed: 'text-[var(--text-tertiary)]',
+  pending: 'text-[var(--text-tertiary)]',
+  indexing: 'text-[var(--accent)]',
+  indexed: 'text-[var(--success)]',
+  failed: 'text-[var(--warning)]',
+}
+
+const KIND_LABEL: Record<ResourceKind, string> = {
   file: '文件',
-  canvas: '画布',
-  chat: '对话',
-  prd: 'PRD',
+  snippet: '片段',
+  document: '文档',
+}
+
+function kindIcon(kind: ResourceKind, fileType: string | null) {
+  if (kind === 'snippet') return <StickyNote size={14} />
+  if (kind === 'document') return <FileText size={14} />
+  if (fileType === 'image') return <ImageIcon size={14} />
+  return <File size={14} />
 }
 
 export default function KnowledgePanel({ projectId }: Props) {
   const qc = useQueryClient()
-  const [filter, setFilter] = useState<'all' | 'file' | 'canvas' | 'chat' | 'prd'>('all')
+  const navigate = useNavigate()
 
-  const { data: sources = [], isLoading } = useQuery({
-    queryKey: ['knowledge-sources', projectId],
-    queryFn: () => knowledgeApi.sources(projectId),
-    refetchInterval: 5000,
+  const { data: items = [], isLoading } = useQuery({
+    queryKey: ['resources', projectId],
+    queryFn: () => resourcesApi.list(projectId),
+    refetchInterval: (q) => {
+      const data = q.state.data as ResourceBlock[] | undefined
+      return data?.some(r => r.rag_status === 'indexing' || r.rag_status === 'pending') ? 2000 : false
+    },
   })
 
-  const { data: canvasSessions = [] } = useQuery({
-    queryKey: ['canvas-sessions', projectId],
-    queryFn: () => canvasSessionsApi.list(projectId),
+  const { left, right } = useMemo(() => {
+    const left: ResourceBlock[] = []
+    const right: ResourceBlock[] = []
+    for (const r of items) (r.is_in_kb ? right : left).push(r)
+    return { left, right }
+  }, [items])
+
+  const indexMut = useMutation({
+    mutationFn: (id: string) => resourcesApi.index(projectId, id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['resources', projectId] }),
   })
 
-  const { data: chatSessions = [] } = useQuery({
-    queryKey: ['chat-sessions', projectId],
-    queryFn: () => chatSessionsApi.list(projectId),
-  })
-
-  const syncMut = useMutation({
-    mutationFn: (data: { source_type: 'canvas' | 'chat' | 'prd'; session_ids?: string[] }) =>
-      knowledgeApi.sync(projectId, data),
-    onSettled: () => qc.invalidateQueries({ queryKey: ['knowledge-sources', projectId] }),
+  const unindexMut = useMutation({
+    mutationFn: (id: string) => resourcesApi.unindex(projectId, id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['resources', projectId] }),
   })
 
   const rebuildMut = useMutation({
     mutationFn: () => knowledgeApi.rebuild(projectId),
-    onSettled: () => qc.invalidateQueries({ queryKey: ['knowledge-sources', projectId] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['resources', projectId] }),
   })
 
   const resetMut = useMutation({
     mutationFn: () => knowledgeApi.reset(projectId),
-    onSettled: () => qc.invalidateQueries({ queryKey: ['knowledge-sources', projectId] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['resources', projectId] }),
   })
 
-  const filtered: RAGSource[] = sources.filter(s => filter === 'all' || s.source_type === filter)
+  function openResource(r: ResourceBlock) {
+    if (r.kind === 'file') return
+    navigate(`/projects/${projectId}/docs/${r.id}`)
+  }
 
-  const labelOf = (s: RAGSource): string => {
-    if (s.source_type === 'canvas') {
-      return canvasSessions.find(c => c.id === s.source_session_id)?.title ?? s.doc_id
-    }
-    if (s.source_type === 'chat') {
-      return chatSessions.find(c => c.id === s.source_session_id)?.title ?? s.doc_id
-    }
-    return s.source_ref ?? s.doc_id
+  function ListColumn({
+    title, rows, action, actionIcon,
+  }: {
+    title: string
+    rows: ResourceBlock[]
+    action: (id: string) => void
+    actionIcon: React.ReactNode
+  }) {
+    return (
+      <div className="flex-1 min-w-0 flex flex-col bg-white border border-[var(--border)] rounded-[var(--radius-md)] overflow-hidden">
+        <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] bg-[var(--bg-surface)]">
+          <span className="text-sm font-semibold text-[var(--text-primary)]">{title}</span>
+          <span className="text-xs text-[var(--text-tertiary)]">{rows.length}</span>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {rows.length === 0 ? (
+            <div className="p-6 text-center text-xs text-[var(--text-tertiary)]">空</div>
+          ) : (
+            <ul className="divide-y divide-[var(--border)]">
+              {rows.map(r => (
+                <li key={r.id} className="flex items-center gap-2 px-3 py-2 hover:bg-[var(--accent-light)] transition-colors group">
+                  <span className="text-[var(--text-secondary)]">{kindIcon(r.kind, r.file_type)}</span>
+                  <button className="flex-1 min-w-0 text-left" onClick={() => openResource(r)}>
+                    <p className="text-xs font-medium truncate text-[var(--text-primary)]">
+                      {r.title || r.original_filename || '未命名'}
+                    </p>
+                    <div className="flex items-center gap-2 text-[10px]">
+                      <span className="text-[var(--text-tertiary)]">{KIND_LABEL[r.kind]}</span>
+                      <span className={STATUS_CLASS[r.rag_status]}>{STATUS_LABEL[r.rag_status]}</span>
+                    </div>
+                  </button>
+                  <button
+                    className="text-[var(--accent)] hover:text-[var(--accent-hover)] p-1 opacity-60 group-hover:opacity-100"
+                    onClick={() => action(r.id)}
+                    title={r.is_in_kb ? '移出知识库' : '加入知识库'}
+                  >
+                    {actionIcon}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -88,23 +155,8 @@ export default function KnowledgePanel({ projectId }: Props) {
           <Database size={14} className="text-[var(--accent)]" /> 知识库
         </div>
         <div className="flex items-center gap-1">
-          <Button
-            className="!text-xs !px-2 !py-1"
-            onClick={() => syncMut.mutate({ source_type: 'canvas' })}
-            disabled={syncMut.isPending}
-          >同步画布</Button>
-          <Button
-            className="!text-xs !px-2 !py-1"
-            onClick={() => syncMut.mutate({ source_type: 'chat' })}
-            disabled={syncMut.isPending}
-          >同步对话</Button>
-          <Button
-            className="!text-xs !px-2 !py-1"
-            onClick={() => syncMut.mutate({ source_type: 'prd' })}
-            disabled={syncMut.isPending}
-          >同步 PRD</Button>
           <button
-            className="ml-1 text-xs px-2 py-1 rounded-[var(--radius-sm)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1"
+            className="text-xs px-2 py-1 rounded-[var(--radius-sm)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1"
             onClick={() => rebuildMut.mutate()}
             disabled={rebuildMut.isPending}
             title="重建文件索引"
@@ -120,58 +172,31 @@ export default function KnowledgePanel({ projectId }: Props) {
           >
             <Trash2 size={12} /> 重置
           </button>
+          {(indexMut.isPending || unindexMut.isPending || rebuildMut.isPending || resetMut.isPending) && (
+            <Loader2 size={12} className="animate-spin text-[var(--accent)]" />
+          )}
         </div>
       </header>
 
-      <div className="flex items-center gap-1 px-4 py-2 border-b border-[var(--border)]">
-        {(['all', 'file', 'canvas', 'chat', 'prd'] as const).map(k => (
-          <button
-            key={k}
-            onClick={() => setFilter(k)}
-            className={clsx(
-              'text-xs px-2 py-0.5 rounded',
-              filter === k ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)] hover:bg-[var(--accent-light)]',
-            )}
-          >
-            {k === 'all' ? '全部' : SOURCE_LABEL[k]}
-          </button>
-        ))}
-        {(syncMut.isPending || rebuildMut.isPending || resetMut.isPending) && (
-          <Loader2 size={12} className="ml-auto animate-spin text-[var(--accent)]" />
+      <div className="flex-1 flex gap-3 p-3 overflow-hidden">
+        {isLoading ? (
+          <div className="flex-1 flex items-center justify-center text-xs text-[var(--text-tertiary)]">加载中…</div>
+        ) : (
+          <>
+            <ListColumn
+              title="未入库资源"
+              rows={left}
+              action={(id) => indexMut.mutate(id)}
+              actionIcon={<ChevronRight size={14} />}
+            />
+            <ListColumn
+              title="已入库资源"
+              rows={right}
+              action={(id) => unindexMut.mutate(id)}
+              actionIcon={<ChevronLeft size={14} />}
+            />
+          </>
         )}
-      </div>
-
-      <div className="flex-1 overflow-y-auto px-4 py-2">
-        {isLoading && <div className="text-xs text-[var(--text-tertiary)]">加载中…</div>}
-        {!isLoading && filtered.length === 0 && (
-          <div className="text-xs text-[var(--text-tertiary)] py-4 text-center">尚无任何索引来源</div>
-        )}
-        <ul className="flex flex-col divide-y divide-[var(--border)]">
-          {filtered.map(s => (
-            <li key={s.id} className="py-2 flex items-center gap-2 text-xs">
-              <span className="px-1 rounded bg-[var(--accent-light)] text-[var(--accent)] text-[10px]">
-                {SOURCE_LABEL[s.source_type] ?? s.source_type}
-              </span>
-              <span className="flex-1 truncate text-[var(--text-primary)]">{labelOf(s)}</span>
-              <span className={clsx('text-[10px]', STATUS_COLOR[s.status] ?? '')}>{s.status}</span>
-              {s.indexed_at && (
-                <span className="text-[10px] text-[var(--text-tertiary)]">
-                  {new Date(s.indexed_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                </span>
-              )}
-            </li>
-          ))}
-        </ul>
-        {syncMut.data?.failed?.length ? (
-          <div className="mt-3 text-[11px] text-[var(--warning)]">
-            最近一次同步失败 {syncMut.data.failed.length} 项：
-            <ul className="list-disc pl-4">
-              {syncMut.data.failed.map(f => (
-                <li key={f.doc_id}>{f.doc_id}: {f.error}</li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
       </div>
     </div>
   )

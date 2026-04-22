@@ -41,16 +41,18 @@ class SlideDeck(BaseModel):
 
 PRD_SYSTEM = """\
 You are a senior product manager. Generate a complete, professional PRD document \
-in HTML format following the provided template structure.
+in Markdown format following the provided template structure.
 
 Rules:
-- Use semantic HTML: <h1> for document title, <h2> for section titles, \
-  <h3> for subsections, <p> for paragraphs, <ul>/<li> for lists, \
-  <table> for tables.
-- Each section must be wrapped in <section id="{section_id}"> ... </section>.
-- Use the project context below to populate each section with real content.
-- Be specific, avoid placeholder text.
-- Respond with ONLY valid HTML (no markdown, no code blocks).
+- Use proper Markdown: `#` for the document title, `##` for top-level sections, \
+  `###` for subsections, paragraphs as plain text, `-` / `1.` for lists, \
+  GitHub-flavored `| col | col |` tables, fenced ```mermaid``` blocks for diagrams, \
+  and `$inline$` / `$$block$$` for math.
+- Begin every top-level section with an HTML anchor comment `<!-- section: {{section_id}} -->` \
+  on the line immediately above the `## Heading` so downstream tooling can locate it.
+- Use the project context below to populate each section with real, specific content; \
+  avoid placeholder text.
+- Respond with ONLY Markdown source (no surrounding code fences, no HTML wrapper).
 
 Template: {template_name}
 Section structure:
@@ -71,11 +73,11 @@ Knowledge graph context:
 Chat discussion summary:
 {chat_summary}
 
-Generate the full PRD HTML document now.\
+Generate the full PRD Markdown document now.\
 """
 
 PPT_SYSTEM = """\
-You are a presentation designer. Convert the given PRD HTML into a slide deck JSON.
+You are a presentation designer. Convert the given PRD Markdown into a slide deck JSON.
 Respond ONLY with valid JSON matching this schema:
 {{
   "slides": [
@@ -180,17 +182,14 @@ class PRDAgent:
 
     async def generate_slide_json(
         self,
-        prd_html: str,
+        prd_markdown: str,
         *,
         model: str | None = None,
     ) -> SlideDeck:
-        """
-        Convert PRD HTML to a SlideDeck (used by ppt_renderer).
-        Returns structured JSON; validated via Pydantic.
-        """
+        """Convert PRD Markdown to a SlideDeck (used by ppt_renderer)."""
         messages = [
             {"role": "system", "content": PPT_SYSTEM},
-            {"role": "user", "content": f"PRD HTML:\n{prd_html[:12000]}"},
+            {"role": "user", "content": f"PRD Markdown:\n{prd_markdown[:12000]}"},
         ]
         return await self.llm.complete_json(messages, SlideDeck, model=model, temperature=0.3)
 

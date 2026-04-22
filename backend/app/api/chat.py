@@ -5,7 +5,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -16,11 +16,11 @@ from app.deps import AppDeps, get_deps
 from agents.base import AgentContext, FileContext, Message
 from agents.canvas.context import build_canvas_context, estimate_tokens
 from infra.models import (
-    Attachment,
     Canvas,
     CanvasSession,
     ChatMessage,
     ChatSession,
+    ResourceBlock,
 )
 
 router = APIRouter(
@@ -189,6 +189,120 @@ async def delete_message(
     await deps.db.delete(msg)
 
 
+# ── Export ──────────────────────────────────────────────────────────────────
+
+
+class ExportRequest(BaseModel):
+    target: Literal["canvas", "document"]
+    selection: str | None = None       # markdown substring; defaults to full message
+    title: str | None = None
+    canvas_session_id: str | None = None  # only used for target='canvas' (UI-side hint)
+
+
+class ExportResponse(BaseModel):
+    resource_id: str
+    kind: str                           # 'snippet' for canvas, 'document' for document
+    title: str
+    markdown: str
+    target: str
+    canvas_payload: dict | None = None  # populated when target='canvas'
+
+
+def _summary_from_md(md: str, limit: int = 120) -> str:
+    for line in md.splitlines():
+        s = line.strip().lstrip("#").strip()
+        if s:
+            return s[:limit]
+    return ""
+
+
+@router.post("/messages/{message_id}/export", response_model=ExportResponse)
+async def export_message(
+    project_id: str,
+    session_id: str,
+    message_id: str,
+    body: ExportRequest,
+    deps: Annotated[AppDeps, Depends(get_deps)],
+):
+    """Export a chat message (or a selected substring) into a resource block.
+
+    Always creates a ResourceBlock + a Reference edge from the source chat
+    message. For target='canvas' we additionally return a payload the
+    frontend can drop straight into the Excalidraw scene as an AI card.
+    """
+    from infra.models import Reference
+
+    await _ensure_session(deps, project_id, session_id)
+    msg = await deps.db.get(ChatMessage, message_id)
+    if not msg or msg.chat_session_id != session_id:
+        raise HTTPException(404, "Message not found")
+
+    markdown = (body.selection or msg.content or "").strip()
+    if not markdown:
+        raise HTTPException(400, "Empty selection")
+
+    summary = _summary_from_md(markdown)
+    title = (body.title or summary or "Chat export").strip()[:200]
+    kind = "snippet" if body.target == "canvas" else "document"
+
+    rb = ResourceBlock(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        kind=kind,
+        title=title,
+        summary=summary,
+        markdown_content=markdown,
+        origin_type="chat_message",
+        origin_ref=json.dumps({
+            "chat_session_id": session_id,
+            "message_id": message_id,
+            "is_partial": bool(body.selection),
+        }),
+    )
+    deps.db.add(rb)
+    await deps.db.flush()
+
+    # Reference edge: chat_message -> resource_block (derived_from)
+    deps.db.add(Reference(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        source_type="chat_message",
+        source_id=message_id,
+        source_session_id=session_id,
+        target_type="resource_block",
+        target_id=rb.id,
+        relation="derived_from",
+        created_by="user",
+    ))
+
+    canvas_payload = None
+    if body.target == "canvas":
+        canvas_payload = {
+            "schemaVersion": 1,
+            "markdown": markdown,
+            "summary": summary,
+            "sources": [{
+                "type": "chat_message",
+                "id": message_id,
+                "label": "AI Chat",
+            }],
+            "prompt": "",
+            "model": msg.model_used or "",
+            "generated_at": datetime.now(timezone.utc).timestamp(),
+            "version": 1,
+            "resource_id": rb.id,
+        }
+
+    return ExportResponse(
+        resource_id=rb.id,
+        kind=kind,
+        title=title,
+        markdown=markdown,
+        target=body.target,
+        canvas_payload=canvas_payload,
+    )
+
+
 # ── Internal helpers ────────────────────────────────────────────────────────
 
 
@@ -228,17 +342,20 @@ async def _build_context(
         canvas_text = build_canvas_context(triples, mode=req.canvas_context_mode or "full")  # type: ignore[arg-type]
 
     files_result = await deps.db.execute(
-        select(Attachment).where(Attachment.project_id == project_id)
+        select(ResourceBlock).where(
+            ResourceBlock.project_id == project_id,
+            ResourceBlock.kind == "file",
+        )
     )
     attachments = files_result.scalars().all()
     file_contexts = [
         FileContext(
             file_id=a.id,
-            filename=a.original_name,
-            file_type=a.file_type,
+            filename=a.original_filename or a.title,
+            file_type=a.file_type or "other",
             extracted_text=a.extracted_text or "",
-            rag_ready=(a.rag_status == "indexed"),
-            file_size=a.file_size,
+            rag_ready=a.is_in_kb,
+            file_size=a.file_size or 0,
         )
         for a in attachments
     ]

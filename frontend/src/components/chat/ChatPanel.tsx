@@ -4,15 +4,20 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Send, Bot, User, Settings, Database, LayoutTemplate,
   Square, RotateCcw, Pencil, Trash2, Copy, Check, ChevronDown, ChevronRight, ChevronUp, Sliders,
+  LayoutPanelLeft, FileText,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { canvasApi, canvasSessionsApi, chatApi, settingsApi, type ChatMessage, type ChatMessageMeta } from '../../api/client'
 import { useChatStore } from '../../store/chatStore'
+import { useCanvasStore } from '../../store/canvasStore'
 import { Button, Spinner } from '../ui'
 import SettingsModal from '../ui/SettingsModal'
 import CustomModelModal from './CustomModelModal'
 import MarkdownMessage from './MarkdownMessage'
+import { createAICard } from '../canvas/nodeInsert'
 import { buildCanvasContext, estimateTokens } from '../canvas/extractCanvasContext'
+import toast from 'react-hot-toast'
+import { useNavigate } from 'react-router-dom'
 
 const RAG_MODES = ['hybrid', 'local', 'global', 'naive']
 const CUSTOM_VALUE = '__custom__'
@@ -51,6 +56,82 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
   const bottomRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const qc = useQueryClient()
+  const canvasApiHandle = useCanvasStore(s => s.api)
+  const navigate = useNavigate()
+
+  /** Pull current text selection if it lies entirely within the given message scope. */
+  function selectionWithin(scopeId: string): string | undefined {
+    const sel = window.getSelection()
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return undefined
+    const range = sel.getRangeAt(0)
+    const root = document.querySelector(`[data-md-scope="${scopeId}"]`)
+    if (!root) return undefined
+    if (!root.contains(range.commonAncestorContainer)) return undefined
+    const text = sel.toString().trim()
+    return text.length > 0 ? text : undefined
+  }
+
+  async function handleExportToCanvas(message: ChatMessage) {
+    if (message.id.startsWith('__')) {
+      toast.error('该消息尚未持久化，请稍候再试')
+      return
+    }
+    try {
+      const selection = selectionWithin(message.id)
+      const res = await chatApi.exportMessage(projectId, chatSessionId, message.id, {
+        target: 'canvas',
+        selection,
+        canvas_session_id: currentCanvasSessionId ?? null,
+      })
+      const payload = res.canvas_payload
+      if (!payload || !canvasApiHandle) {
+        toast.error('画布尚未就绪，无法插入')
+        return
+      }
+      // Place card near the current viewport center.
+      const appState = canvasApiHandle.getAppState() as Record<string, number>
+      const x = (appState?.scrollX ? -appState.scrollX : 0) + 80
+      const y = (appState?.scrollY ? -appState.scrollY : 0) + 80
+      const els = createAICard(x, y, payload as never)
+      canvasApiHandle.updateScene({
+        elements: [...canvasApiHandle.getSceneElements(), ...els] as never[],
+      })
+      toast.success('已插入到画布')
+    } catch (err) {
+      toast.error(`导出失败：${(err as Error).message}`)
+    }
+  }
+
+  async function handleExportToDocument(message: ChatMessage) {
+    if (message.id.startsWith('__')) {
+      toast.error('该消息尚未持久化，请稍候再试')
+      return
+    }
+    try {
+      const selection = selectionWithin(message.id)
+      const res = await chatApi.exportMessage(projectId, chatSessionId, message.id, {
+        target: 'document',
+        selection,
+      })
+      qc.invalidateQueries({ queryKey: ['resources', projectId] })
+      toast.success(
+        (t) => (
+          <div className="flex items-center gap-2">
+            已生成文档
+            <button
+              className="text-[var(--accent)] underline"
+              onClick={() => {
+                toast.dismiss(t.id)
+                navigate(`/projects/${projectId}/docs/${res.resource_id}`)
+              }}
+            >打开</button>
+          </div>
+        ),
+      )
+    } catch (err) {
+      toast.error(`导出失败：${(err as Error).message}`)
+    }
+  }
 
   // Auto-include current canvas session if no selection yet
   useEffect(() => {
@@ -605,6 +686,8 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
             onRegenerate={() => handleRegenerate(m.id, m.content)}
             onEdit={() => handleEdit(m.id, m.content)}
             onDelete={() => handleDelete(m.id)}
+            onExportCanvas={() => handleExportToCanvas(m)}
+            onExportDocument={() => handleExportToDocument(m)}
           />
         ))}
         {streaming && (
@@ -653,6 +736,7 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
 function MessageBubble({
   message, streaming = false,
   canRegenerate, onRegenerate, onEdit, onDelete,
+  onExportCanvas, onExportDocument,
 }: {
   message: ChatMessage
   streaming?: boolean
@@ -660,6 +744,8 @@ function MessageBubble({
   onRegenerate?: () => void
   onEdit?: () => void
   onDelete?: () => void
+  onExportCanvas?: () => void
+  onExportDocument?: () => void
 }) {
   const isUser = message.role === 'user'
   const [copied, setCopied] = useState(false)
@@ -690,7 +776,7 @@ function MessageBubble({
           streaming && 'after:content-[\'▋\'] after:animate-pulse after:ml-0.5',
           meta?.stopped && 'opacity-80',
         )}>
-          {isUser ? message.content : <MarkdownMessage content={message.content} />}
+          {isUser ? message.content : <MarkdownMessage content={message.content} scopeId={message.id} />}
         </div>
 
         {/* Footer: usage / sources / actions */}
@@ -726,6 +812,24 @@ function MessageBubble({
               {onDelete && (
                 <button onClick={onDelete} title="删除" className="text-[var(--text-tertiary)] hover:text-[var(--warning)]">
                   <Trash2 size={12} />
+                </button>
+              )}
+              {!isUser && onExportCanvas && (
+                <button
+                  onClick={onExportCanvas}
+                  title="导出为画布卡片（如有选区只导出选中部分）"
+                  className="text-[var(--text-tertiary)] hover:text-[var(--accent)]"
+                >
+                  <LayoutPanelLeft size={12} />
+                </button>
+              )}
+              {!isUser && onExportDocument && (
+                <button
+                  onClick={onExportDocument}
+                  title="导出为资源文档（如有选区只导出选中部分）"
+                  className="text-[var(--text-tertiary)] hover:text-[var(--accent)]"
+                >
+                  <FileText size={12} />
                 </button>
               )}
             </div>

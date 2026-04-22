@@ -21,6 +21,8 @@ python-multipart>=0.0.9        # FastAPI file upload
 
 # ── Export ─────────────────────────────────────────────────────
 python-pptx>=1.0.0
+markdownify>=0.13.0            # HTML -> Markdown for legacy PRD migration
+markdown>=3.6                  # Markdown -> HTML for DOCX export pipeline
 
 # ── Optional OCR (uncomment if needed) ────────────────────────
 # pytesseract>=0.3.10

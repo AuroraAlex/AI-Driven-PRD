@@ -29,8 +29,11 @@ class Project(Base):
         "ChatSession", back_populates="project", cascade="all, delete-orphan",
         order_by="ChatSession.order_index",
     )
-    attachments: Mapped[list["Attachment"]] = relationship("Attachment", back_populates="project", cascade="all, delete-orphan")  # noqa: F821
-    prd_documents: Mapped[list["PRDDocument"]] = relationship("PRDDocument", back_populates="project", cascade="all, delete-orphan")  # noqa: F821
+    attachments: Mapped[list["ResourceBlock"]] = relationship(  # noqa: F821
+        "ResourceBlock", back_populates="project", cascade="all, delete-orphan",
+        viewonly=True, primaryjoin="and_(Project.id==ResourceBlock.project_id, ResourceBlock.kind=='file')",
+    )
+    resource_blocks: Mapped[list["ResourceBlock"]] = relationship("ResourceBlock", back_populates="project", cascade="all, delete-orphan")  # noqa: F821
 
     def __repr__(self) -> str:
         return f"<Project id={self.id!r} name={self.name!r}>"

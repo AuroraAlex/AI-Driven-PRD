@@ -14,7 +14,7 @@ from app.deps import AppDeps, get_deps
 from agents.canvas.ai_card import AICardAgent, AICardContent
 from agents.canvas.context import build_canvas_context
 from agents.base import FileContext
-from infra.models import Attachment, Canvas, CanvasSession
+from infra.models import Canvas, CanvasSession, ResourceBlock
 
 router = APIRouter(prefix="/projects/{project_id}/ai-cards", tags=["ai-cards"])
 
@@ -56,16 +56,19 @@ async def generate_card(
 
     # Files
     files_res = await deps.db.execute(
-        select(Attachment).where(Attachment.project_id == project_id)
+        select(ResourceBlock).where(
+            ResourceBlock.project_id == project_id,
+            ResourceBlock.kind == "file",
+        )
     )
     file_ctxs = [
         FileContext(
             file_id=a.id,
-            filename=a.original_name,
-            file_type=a.file_type,
+            filename=a.original_filename or a.title,
+            file_type=a.file_type or "other",
             extracted_text=a.extracted_text or "",
-            rag_ready=(a.rag_status == "indexed"),
-            file_size=a.file_size,
+            rag_ready=a.is_in_kb,
+            file_size=a.file_size or 0,
         )
         for a in files_res.scalars().all()
     ]

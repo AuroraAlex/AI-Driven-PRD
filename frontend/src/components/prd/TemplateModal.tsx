@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { FileDown, Presentation, FileText, Sparkles } from 'lucide-react'
-import { prdApi, exportApi, type PRDDocument } from '../../api/client'
+import { documentsApi, exportApi, type PRDDocument } from '../../api/client'
 import { usePRDStore } from '../../store/prdStore'
 import { Button, Spinner } from '../ui'
 
@@ -23,11 +23,13 @@ export default function TemplateModal({ projectId, onOpen }: Props) {
   const [model, setModel] = useState('openai/gpt-4o')
   const [showPicker, setShowPicker] = useState(false)
 
-  useQuery({
+  const { data: docList } = useQuery({
     queryKey: ['prd-list', projectId],
-    queryFn: () => prdApi.list(projectId),
-    onSuccess: setDocuments,
-  } as any)
+    queryFn: () => documentsApi.list(projectId),
+  })
+  useEffect(() => {
+    if (docList) setDocuments(docList)
+  }, [docList, setDocuments])
 
   async function generate() {
     setGenerating(true)
@@ -36,7 +38,7 @@ export default function TemplateModal({ projectId, onOpen }: Props) {
     let buffer = ''
 
     try {
-      const res = await prdApi.generate(projectId, selectedTemplate, model)
+      const res = await documentsApi.generate(projectId, selectedTemplate, model)
       prdId = res.headers.get('X-PRD-ID') ?? ''
       if (!res.body) throw new Error('No body')
       const reader = res.body.getReader()
@@ -59,7 +61,7 @@ export default function TemplateModal({ projectId, onOpen }: Props) {
       }
 
       if (prdId) {
-        const prd = await prdApi.get(projectId, prdId)
+        const prd = await documentsApi.get(projectId, prdId)
         upsert(prd)
         onOpen(prd)
       }

@@ -148,3 +148,34 @@ def docx_to_pdf(docx_bytes: bytes) -> bytes:
 def html_to_pdf(html: str) -> bytes:
     """Convenience: HTML → DOCX → PDF."""
     return docx_to_pdf(html_to_docx(html))
+
+
+# ── Markdown export ───────────────────────────────────────────────────────────
+
+def markdown_to_html(md: str) -> str:
+    """Render Markdown source to HTML using the `markdown` library.
+
+    Enables fenced code, tables, GFM-style features. Math/Mermaid blocks fall
+    through as ``<pre><code class="language-...">`` which the DOCX converter
+    treats as literal text — good enough for export fidelity.
+    """
+    try:
+        import markdown as _md
+    except ImportError:  # pragma: no cover
+        # Naive fallback so callers don't crash before deps are installed
+        return f"<pre>{md}</pre>"
+    return _md.markdown(
+        md or "",
+        extensions=["fenced_code", "tables", "toc", "sane_lists"],
+        output_format="html5",
+    )
+
+
+def markdown_to_docx(md: str) -> bytes:
+    """Markdown -> HTML -> DOCX bytes."""
+    return html_to_docx(markdown_to_html(md))
+
+
+def markdown_to_pdf(md: str) -> bytes:
+    """Markdown -> HTML -> DOCX -> PDF bytes (LibreOffice required)."""
+    return docx_to_pdf(markdown_to_docx(md))

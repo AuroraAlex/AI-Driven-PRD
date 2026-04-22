@@ -13,13 +13,12 @@ from app.deps import AppDeps, get_deps
 from agents.base import AgentContext
 from agents.canvas.context import build_canvas_context
 from infra.models import (
-    Attachment,
     Canvas,
     CanvasSession,
     ChatMessage,
     ChatSession,
-    PRDDocument,
     RAGIndex,
+    ResourceBlock,
 )
 
 router = APIRouter(prefix="/projects/{project_id}/rag", tags=["rag"])
@@ -42,18 +41,20 @@ async def rag_status(
     project_id: str,
     deps: Annotated[AppDeps, Depends(get_deps)],
 ):
-    """Return indexing status for all files in the project."""
+    """Return indexing status for all file resources in the project."""
     result = await deps.db.execute(
-        select(Attachment).where(Attachment.project_id == project_id)
+        select(ResourceBlock).where(
+            ResourceBlock.project_id == project_id,
+            ResourceBlock.kind == "file",
+        )
     )
-    attachments = result.scalars().all()
     return [
         {
             "file_id": a.id,
-            "filename": a.original_name,
-            "rag_status": a.rag_status,
+            "filename": a.original_filename or a.title,
+            "rag_status": "indexed" if a.is_in_kb else "pending",
         }
-        for a in attachments
+        for a in result.scalars().all()
     ]
 
 
@@ -62,7 +63,6 @@ async def list_sources(
     project_id: str,
     deps: Annotated[AppDeps, Depends(get_deps)],
 ):
-    """List every RAG-indexed source (file/canvas/chat/prd) and its status."""
     res = await deps.db.execute(
         select(RAGIndex).where(RAGIndex.project_id == project_id).order_by(RAGIndex.created_at.desc())
     )
@@ -91,6 +91,7 @@ async def _upsert_index_row(
     doc_id: str,
     status: str,
     error_msg: str | None = None,
+    resource_id: str | None = None,
 ):
     res = await deps.db.execute(
         select(RAGIndex).where(
@@ -108,11 +109,14 @@ async def _upsert_index_row(
             doc_id=doc_id,
             status=status,
             error_msg=error_msg,
+            resource_id=resource_id,
         )
         deps.db.add(row)
     else:
         row.status = status
         row.error_msg = error_msg
+        if resource_id and not row.resource_id:
+            row.resource_id = resource_id
     if status == "indexed":
         row.indexed_at = datetime.now(timezone.utc)
 
@@ -123,10 +127,6 @@ async def sync_source(
     body: SyncRequest,
     deps: Annotated[AppDeps, Depends(get_deps)],
 ):
-    """Push canvas / chat / prd content into the knowledge graph as documents.
-
-    Strategy: per session we build one big document keyed `<type>:<session_id>`.
-    """
     indexed: list[str] = []
     failed: list[dict] = []
 
@@ -189,25 +189,30 @@ async def sync_source(
 
     elif body.source_type == "prd":
         prds = (await deps.db.execute(
-            select(PRDDocument).where(PRDDocument.project_id == project_id)
+            select(ResourceBlock).where(
+                ResourceBlock.project_id == project_id,
+                ResourceBlock.kind == "document",
+            )
         )).scalars().all()
         for p in prds:
-            text = p.content_html or ""
-            if not text.strip():
+            text = (p.markdown_content or "").strip()
+            if not text:
                 continue
-            doc_id = f"prd:{p.id}"
+            doc_id = f"resource:{p.id}"
             try:
                 await deps.rag_agent.upsert(project_id, text, doc_id)
                 await _upsert_index_row(
-                    deps, project_id=project_id, source_type="prd",
+                    deps, project_id=project_id, source_type="resource",
                     source_session_id=None, source_ref=p.id, doc_id=doc_id, status="indexed",
+                    resource_id=p.id,
                 )
+                p.is_in_kb = True
                 indexed.append(doc_id)
             except Exception as exc:
                 await _upsert_index_row(
-                    deps, project_id=project_id, source_type="prd",
+                    deps, project_id=project_id, source_type="resource",
                     source_session_id=None, source_ref=p.id, doc_id=doc_id,
-                    status="failed", error_msg=str(exc),
+                    status="failed", error_msg=str(exc), resource_id=p.id,
                 )
                 failed.append({"doc_id": doc_id, "error": str(exc)})
 
@@ -220,24 +225,25 @@ async def rebuild_index(
     project_id: str,
     deps: Annotated[AppDeps, Depends(get_deps)],
 ):
-    """Rebuild the entire knowledge graph for the project (files only)."""
+    """Rebuild the entire knowledge graph for the project (file resources only)."""
     result = await deps.db.execute(
-        select(Attachment)
-        .where(Attachment.project_id == project_id)
-        .where(Attachment.extracted_text.isnot(None))
+        select(ResourceBlock)
+        .where(
+            ResourceBlock.project_id == project_id,
+            ResourceBlock.kind == "file",
+            ResourceBlock.extracted_text.isnot(None),
+        )
     )
     attachments = result.scalars().all()
-
     if not attachments:
-        raise HTTPException(status_code=400, detail="No indexed files found for this project")
+        raise HTTPException(status_code=400, detail="No indexable file resources for this project")
 
-    documents = [(a.id, a.extracted_text) for a in attachments if a.extracted_text]
+    documents = [(f"resource:{a.id}", a.extracted_text) for a in attachments if a.extracted_text]
     await deps.rag_agent.rebuild(project_id, documents)
 
     for a in attachments:
-        a.rag_status = "indexed"
+        a.is_in_kb = True
     await deps.db.flush()
-
     return {"message": f"Rebuilt knowledge graph with {len(documents)} documents"}
 
 
@@ -246,7 +252,6 @@ async def reset_index(
     project_id: str,
     deps: Annotated[AppDeps, Depends(get_deps)],
 ):
-    """Drop the entire LightRAG working dir and mark all index rows as unindexed."""
     await deps.rag_agent.reset(project_id)
     res = await deps.db.execute(
         select(RAGIndex).where(RAGIndex.project_id == project_id)
@@ -255,12 +260,11 @@ async def reset_index(
         row.status = "unindexed"
         row.indexed_at = None
         row.error_msg = None
-    # Also clear file rag_status so the UI reflects reality
     a_res = await deps.db.execute(
-        select(Attachment).where(Attachment.project_id == project_id)
+        select(ResourceBlock).where(ResourceBlock.project_id == project_id)
     )
     for a in a_res.scalars().all():
-        a.rag_status = "pending"
+        a.is_in_kb = False
     await deps.db.flush()
     return {"message": "knowledge graph reset"}
 
@@ -271,7 +275,6 @@ async def debug_query(
     req: RAGQueryRequest,
     deps: Annotated[AppDeps, Depends(get_deps)],
 ):
-    """Direct RAG query — for debugging/testing the knowledge graph."""
     ctx = AgentContext(
         project_id=project_id,
         user_query=req.query,

@@ -18,7 +18,16 @@ def _now() -> datetime:
 
 
 # Allowed values for source_type / target_type
-REF_TYPES = ("canvas_card", "chat_message", "prd_section", "rag_chunk", "file")
+# `file` is kept as an alias for `resource_block` of kind=file for backward
+# compatibility; `resource_block` covers file/snippet/document uniformly.
+REF_TYPES = (
+    "canvas_card",
+    "chat_message",
+    "prd_section",
+    "rag_chunk",
+    "file",
+    "resource_block",
+)
 REF_RELATIONS = ("cites", "derived_from", "mentions", "embedded_in")
 
 

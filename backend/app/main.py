@@ -23,7 +23,7 @@ from app.api import (
     canvas_snapshot,
     chat,
     chat_sessions,
-    files,
+    resources,
     rag,
     prd,
     export,
@@ -73,7 +73,8 @@ def create_app() -> FastAPI:
     app.include_router(canvas_snapshot.router, prefix=prefix)
     app.include_router(chat_sessions.router, prefix=prefix)
     app.include_router(chat.router, prefix=prefix)
-    app.include_router(files.router, prefix=prefix)
+    app.include_router(resources.router, prefix=prefix)
+    app.include_router(resources.legacy_files_router, prefix=prefix)
     app.include_router(rag.router, prefix=prefix)
     app.include_router(prd.router, prefix=prefix)
     app.include_router(export.router, prefix=prefix)

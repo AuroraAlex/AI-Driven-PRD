@@ -15,15 +15,35 @@ export interface Project {
   updated_at: string
 }
 
-export interface Attachment {
+export type ResourceKind = 'file' | 'snippet' | 'document'
+export type ResourceOriginType = 'upload' | 'manual' | 'chat_message' | 'canvas_card' | 'prd_template'
+export type ResourceRagStatus = 'unindexed' | 'pending' | 'indexing' | 'indexed' | 'failed'
+
+export interface ResourceBlock {
   id: string
-  filename: string
-  original_name: string
-  file_type: string
+  project_id: string
+  kind: ResourceKind
+  title: string
+  summary: string | null
+  markdown_content: string
+  origin_type: ResourceOriginType
+  origin_ref: Record<string, unknown> | unknown[] | string | null
+  template_type: string | null
+  tags: string[]
+  is_in_kb: boolean
+  rag_status: ResourceRagStatus
+  // file-only fields
+  storage_filename: string | null
+  original_filename: string | null
+  file_type: string | null
   file_size: number
-  rag_status: 'pending' | 'indexing' | 'indexed' | 'failed'
-  uploaded_at: string
+  extracted_text: string | null
+  created_at: string
+  updated_at: string
 }
+
+/** @deprecated use ResourceBlock (kind='file') */
+export type Attachment = ResourceBlock
 
 export interface ChatMessageMeta {
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
@@ -116,15 +136,8 @@ export interface RAGSource {
   error_msg: string | null
 }
 
-export interface PRDDocument {
-  id: string
-  project_id: string
-  template_type: string
-  title: string
-  content_html: string
-  created_at: string
-  updated_at: string
-}
+/** Document resource — alias of ResourceBlock with kind='document'. */
+export type PRDDocument = ResourceBlock
 
 // ── Projects ──────────────────────────────────────────────────────────────
 
@@ -197,20 +210,56 @@ export const chatSessionsApi = {
     http.delete(`/projects/${projectId}/chat-sessions/${sessionId}`),
 }
 
-// ── Files ─────────────────────────────────────────────────────────────────
+// ── Resources (files + snippets + documents) ─────────────────────────────
 
-export const filesApi = {
-  list: (projectId: string) =>
-    http.get<Attachment[]>(`/projects/${projectId}/files`).then(r => r.data),
+export interface ResourceCreatePayload {
+  kind: 'snippet' | 'document'
+  title?: string
+  markdown_content?: string
+  summary?: string | null
+  origin_type?: ResourceOriginType
+  origin_ref?: Record<string, unknown> | null
+  template_type?: string | null
+  tags?: string[]
+}
+
+export interface ResourceUpdatePayload {
+  title?: string
+  markdown_content?: string
+  summary?: string | null
+  kind?: 'snippet' | 'document'
+  tags?: string[]
+}
+
+export const resourcesApi = {
+  list: (projectId: string, params: { kind?: ResourceKind; in_kb?: boolean } = {}) =>
+    http.get<ResourceBlock[]>(`/projects/${projectId}/resources`, { params }).then(r => r.data),
+  get: (projectId: string, resourceId: string) =>
+    http.get<ResourceBlock>(`/projects/${projectId}/resources/${resourceId}`).then(r => r.data),
+  create: (projectId: string, body: ResourceCreatePayload) =>
+    http.post<ResourceBlock>(`/projects/${projectId}/resources`, body).then(r => r.data),
+  update: (projectId: string, resourceId: string, body: ResourceUpdatePayload) =>
+    http.patch<ResourceBlock>(`/projects/${projectId}/resources/${resourceId}`, body).then(r => r.data),
+  delete: (projectId: string, resourceId: string) =>
+    http.delete(`/projects/${projectId}/resources/${resourceId}`),
   upload: (projectId: string, file: File) => {
     const form = new FormData()
     form.append('file', file)
-    return http.post<Attachment>(`/projects/${projectId}/files`, form, {
+    return http.post<ResourceBlock>(`/projects/${projectId}/resources/upload`, form, {
       headers: { 'Content-Type': 'multipart/form-data' },
     }).then(r => r.data)
   },
-  delete: (projectId: string, fileId: string) =>
-    http.delete(`/projects/${projectId}/files/${fileId}`),
+  index: (projectId: string, resourceId: string) =>
+    http.post<ResourceBlock>(`/projects/${projectId}/resources/${resourceId}/index`).then(r => r.data),
+  unindex: (projectId: string, resourceId: string) =>
+    http.delete<ResourceBlock>(`/projects/${projectId}/resources/${resourceId}/index`).then(r => r.data),
+}
+
+/** @deprecated use resourcesApi */
+export const filesApi = {
+  list: (projectId: string) => resourcesApi.list(projectId, { kind: 'file' }),
+  upload: (projectId: string, file: File) => resourcesApi.upload(projectId, file),
+  delete: (projectId: string, fileId: string) => resourcesApi.delete(projectId, fileId),
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────
@@ -267,6 +316,24 @@ export const chatApi = {
     ).then(r => r.data),
   deleteMessage: (projectId: string, sessionId: string, messageId: string) =>
     http.delete(`/projects/${projectId}/chat-sessions/${sessionId}/messages/${messageId}`),
+  /** Export a chat message (full or selected substring) into a resource block. */
+  exportMessage: (
+    projectId: string,
+    sessionId: string,
+    messageId: string,
+    body: { target: 'canvas' | 'document'; selection?: string; title?: string; canvas_session_id?: string | null },
+  ) =>
+    http.post<{
+      resource_id: string
+      kind: 'snippet' | 'document'
+      title: string
+      markdown: string
+      target: 'canvas' | 'document'
+      canvas_payload: AICardContent | null
+    }>(
+      `/projects/${projectId}/chat-sessions/${sessionId}/messages/${messageId}/export`,
+      body,
+    ).then(r => r.data),
 }
 
 // ── References ────────────────────────────────────────────────────────────
@@ -328,15 +395,13 @@ export const knowledgeApi = {
     http.post<{ query: string; mode: string; results: unknown[] }>(`/projects/${projectId}/rag/query`, data).then(r => r.data),
 }
 
-// ── PRD ───────────────────────────────────────────────────────────────────
+// ── Documents (Markdown PRDs / docs) ──────────────────────────────────────
 
-export const prdApi = {
-  list: (projectId: string) =>
-    http.get<PRDDocument[]>(`/projects/${projectId}/prd`).then(r => r.data),
-  get: (projectId: string, prdId: string) =>
-    http.get<PRDDocument>(`/projects/${projectId}/prd/${prdId}`).then(r => r.data),
-  update: (projectId: string, prdId: string, data: { title?: string; content_html?: string }) =>
-    http.put<PRDDocument>(`/projects/${projectId}/prd/${prdId}`, data).then(r => r.data),
+export const documentsApi = {
+  list: (projectId: string) => resourcesApi.list(projectId, { kind: 'document' }),
+  get: (projectId: string, id: string) => resourcesApi.get(projectId, id),
+  update: (projectId: string, id: string, data: { title?: string; markdown_content?: string }) =>
+    resourcesApi.update(projectId, id, data),
   generate: (projectId: string, templateType: string, model: string) =>
     fetch(`/api/projects/${projectId}/prd/generate`, {
       method: 'POST',
@@ -344,6 +409,9 @@ export const prdApi = {
       body: JSON.stringify({ template_type: templateType, model }),
     }),
 }
+
+/** @deprecated use documentsApi */
+export const prdApi = documentsApi
 
 // ── Export ────────────────────────────────────────────────────────────────
 

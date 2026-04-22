@@ -34,9 +34,9 @@ class RAGIndex(Base):
     source_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     doc_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
-    # Legacy: kept for file-based sources only
-    attachment_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("attachments.id", ondelete="CASCADE"), nullable=True, unique=True
+    # Legacy column kept (renamed via migration). NULL for non-resource sources.
+    resource_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("resource_blocks.id", ondelete="CASCADE"), nullable=True, unique=True
     )
 
     status: Mapped[str] = mapped_column(String(16), default="pending")  # pending | indexing | indexed | failed | unindexed
@@ -44,4 +44,4 @@ class RAGIndex(Base):
     indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
-    attachment: Mapped["Attachment | None"] = relationship("Attachment", back_populates="rag_index")  # noqa: F821
+    resource: Mapped["ResourceBlock | None"] = relationship("ResourceBlock", back_populates="rag_index")  # noqa: F821
