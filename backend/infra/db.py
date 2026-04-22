@@ -84,9 +84,14 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with factory() as session:
         try:
             yield session
-            await session.commit()
+            # Skip final commit if the handler already closed the session
+            # (e.g. SSE handlers commit + close early to release the SQLite
+            # write lock before streaming).
+            if session.is_active:
+                await session.commit()
         except Exception:
-            await session.rollback()
+            if session.is_active:
+                await session.rollback()
             raise
 
 

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Send, Bot, User, Settings, Database, LayoutTemplate,
-  Square, RotateCcw, Pencil, Trash2, Copy, Check, ChevronDown, ChevronRight,
+  Square, RotateCcw, Pencil, Trash2, Copy, Check, ChevronDown, ChevronRight, ChevronUp, Sliders,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { canvasApi, canvasSessionsApi, chatApi, settingsApi, type ChatMessage, type ChatMessageMeta } from '../../api/client'
@@ -44,6 +45,9 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
   const [showCustomModal, setShowCustomModal] = useState(false)
   const [showCanvasPicker, setShowCanvasPicker] = useState(false)
   const [estimatedTokens, setEstimatedTokens] = useState(0)
+  const [editTarget, setEditTarget] = useState<{ id: string; content: string } | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const [configOpen, setConfigOpen] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const qc = useQueryClient()
@@ -99,13 +103,26 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, streamBuffer])
 
-  // Load history on mount
-  useQuery({
+  // Clear cross-session leakage from the global Zustand `messages` slice when
+  // switching to a different chat session — otherwise the previous session's
+  // bubbles linger until the new history finishes loading, AND any
+  // edit/delete fired against those bubbles 404s because the message
+  // doesn't belong to the active session.
+  useEffect(() => {
+    setMessages([])
+    clearBuffer()
+  }, [chatSessionId, setMessages, clearBuffer])
+
+  // Load history on mount and sync into the Zustand store whenever it changes.
+  // (React Query v5 removed `onSuccess`, so we sync via effect instead.)
+  const { data: historyData } = useQuery({
     queryKey: ['chat-history', projectId, chatSessionId],
     queryFn: () => chatApi.history(projectId, chatSessionId),
     enabled: !!chatSessionId,
-    onSuccess: setMessages,
-  } as any)
+  })
+  useEffect(() => {
+    if (historyData) setMessages(historyData)
+  }, [historyData, setMessages])
 
   // List canvas sessions for the picker
   const { data: canvasSessions = [] } = useQuery({
@@ -160,7 +177,6 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
 
   async function runStream(
     streamFactory: (signal: AbortSignal) => Promise<Response>,
-    afterTokens: { tempUserMsg?: ChatMessage } = {},
   ) {
     setStreaming(true)
     clearBuffer()
@@ -168,8 +184,40 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
     abortRef.current = ac
 
     let aborted = false
-    let meta: ChatMessageMeta = {}
-    const ragSources: ChatMessageMeta['rag_sources'] = []
+    const meta: ChatMessageMeta = {}
+    const ragSources: NonNullable<ChatMessageMeta['rag_sources']> = []
+
+    const cleanup = () => {
+      if (ragSources.length > 0) meta.rag_sources = ragSources
+      if (aborted) meta.stopped = true
+      abortRef.current = null
+      // 1) Flip the Send button back FIRST in its own commit so it's never
+      //    batched with the message-push render below (React 19 will
+      //    otherwise sometimes leave the button visually stuck on Stop).
+      flushSync(() => {
+        setStreaming(false)
+      })
+      // 2) Push the assistant bubble locally for instant feedback (the real
+      //    DB row will replace it via the history refetch below — that gives
+      //    us the real id so edit/delete work).
+      const finalContent = useChatStore.getState().streamBuffer
+      if (finalContent.trim().length > 0) {
+        useChatStore.getState().setMessages([
+          ...useChatStore.getState().messages,
+          {
+            id: `__local_${crypto.randomUUID()}`,
+            role: 'assistant',
+            content: finalContent,
+            model_used: model,
+            trace_id: null,
+            meta: Object.keys(meta).length ? meta : null,
+            created_at: new Date().toISOString(),
+          },
+        ])
+      }
+      clearBuffer()
+      qc.invalidateQueries({ queryKey: ['chat-history', projectId, chatSessionId] })
+    }
 
     try {
       const res = await streamFactory(ac.signal)
@@ -203,35 +251,10 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
         }
       }
     } catch (err: any) {
-      if (err?.name === 'AbortError') {
-        aborted = true
-      } else {
-        console.error('Chat stream error', err)
-      }
+      if (err?.name === 'AbortError') aborted = true
+      else console.error('Chat stream error', err)
     } finally {
-      if (ragSources.length > 0) meta.rag_sources = ragSources
-      if (aborted) meta.stopped = true
-      const finalContent = useChatStore.getState().streamBuffer
-      if (finalContent.trim().length > 0) {
-        useChatStore.getState().setMessages([
-          ...useChatStore.getState().messages,
-          {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: finalContent,
-            model_used: model,
-            trace_id: null,
-            meta: Object.keys(meta).length ? meta : null,
-            created_at: new Date().toISOString(),
-          },
-        ])
-      }
-      clearBuffer()
-      setStreaming(false)
-      abortRef.current = null
-      // Refetch from server to align with persisted ids/usage
-      qc.invalidateQueries({ queryKey: ['chat-history', projectId, chatSessionId] })
-      void afterTokens
+      cleanup()
     }
   }
 
@@ -283,20 +306,57 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
   }
 
   async function handleEdit(messageId: string, currentContent: string) {
-    const next = window.prompt('编辑消息内容：', currentContent)
-    if (next === null || next.trim() === currentContent.trim()) return
+    setEditTarget({ id: messageId, content: currentContent })
+  }
+
+  async function commitEdit(next: string) {
+    if (!editTarget) return
+    const { id } = editTarget
+    setEditTarget(null)
+    if (next.trim() === editTarget.content.trim()) return
+    if (id.startsWith('__local_')) {
+      alert('该消息尚未持久化，无法编辑（请稍候片刻让历史同步后再试）。')
+      return
+    }
     try {
-      await chatApi.editMessage(projectId, chatSessionId, messageId, next)
+      await chatApi.editMessage(projectId, chatSessionId, id, next)
+      useChatStore.getState().setMessages(
+        useChatStore.getState().messages.map(m =>
+          m.id === id ? { ...m, content: next, meta: { ...(m.meta ?? {}), edited_at: new Date().toISOString() } } : m,
+        ),
+      )
       qc.invalidateQueries({ queryKey: ['chat-history', projectId, chatSessionId] })
-    } catch (err) { console.error(err) }
+    } catch (err: any) {
+      console.error(err)
+      alert('编辑失败：' + (err?.response?.data?.detail || err?.message || '未知错误，请确认后端已重启加载新接口。'))
+    }
   }
 
   async function handleDelete(messageId: string) {
-    if (!window.confirm('删除该消息？')) return
+    setConfirmDelete(messageId)
+  }
+
+  async function commitDelete() {
+    const id = confirmDelete
+    if (!id) return
+    setConfirmDelete(null)
+    // Local-only optimistic message (not yet refetched from DB) — just drop it.
+    if (id.startsWith('__local_')) {
+      useChatStore.getState().setMessages(
+        useChatStore.getState().messages.filter(m => m.id !== id),
+      )
+      return
+    }
     try {
-      await chatApi.deleteMessage(projectId, chatSessionId, messageId)
+      await chatApi.deleteMessage(projectId, chatSessionId, id)
+      useChatStore.getState().setMessages(
+        useChatStore.getState().messages.filter(m => m.id !== id),
+      )
       qc.invalidateQueries({ queryKey: ['chat-history', projectId, chatSessionId] })
-    } catch (err) { console.error(err) }
+    } catch (err: any) {
+      console.error(err)
+      alert('删除失败：' + (err?.response?.data?.detail || err?.message || '未知错误，请确认后端已重启加载新接口。'))
+    }
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -307,7 +367,7 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col flex-1 min-h-0 h-full">
       {showSettings && (
         <SettingsModal
           onClose={() => {
@@ -325,117 +385,160 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
           onConfirm={handleCustomConfirm}
         />
       )}
+      {editTarget && (
+        <EditMessageModal
+          initial={editTarget.content}
+          onCancel={() => setEditTarget(null)}
+          onConfirm={commitEdit}
+        />
+      )}
+      {confirmDelete && (
+        <ConfirmModal
+          message="确认删除该消息？此操作不可撤销。"
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={commitDelete}
+        />
+      )}
 
       {/* Toolbar */}
-      <div className="border-b border-[var(--border)] shrink-0">
-        {/* Row 1: provider + model + settings */}
-        <div className="flex items-center gap-2 px-4 pt-2 pb-1.5">
-          {modelsLoading ? (
-            <div className="flex items-center gap-1.5 text-xs text-[var(--text-tertiary)]">
-              <Spinner size={12} /> 加载模型…
-            </div>
-          ) : availableProviders.length === 0 ? (
-            <button
-              onClick={() => setShowSettings(true)}
-              className="flex items-center gap-1.5 text-xs text-[var(--warning)] hover:opacity-80 transition-opacity"
-            >
-              <Settings size={12} /> 请先配置 API Key
-            </button>
-          ) : (
-            <>
-              {/* Provider select */}
-              <select
-                className="text-xs border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
-                value={provider}
-                onChange={e => handleProviderChange(e.target.value)}
-                title="平台"
-              >
-                {availableProviders.map(p => (
-                  <option key={p} value={p}>{PROVIDER_LABELS[p] || p}</option>
-                ))}
-              </select>
-
-              {/* Model select (filtered by provider) */}
-              <select
-                className="text-xs border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none max-w-[220px]"
-                value={model}
-                onChange={e => handleModelChange(e.target.value)}
-                title="模型"
-              >
-                {presets.map(m => (
-                  <option key={m.value} value={m.value}>{m.label}</option>
-                ))}
-                {currentCustom && !presets.find(m => m.value === currentCustom) && (
-                  <option value={currentCustom}>
-                    {currentCustom.replace(`${provider}/`, '')}（自定义）
-                  </option>
-                )}
-                <option value={CUSTOM_VALUE}>自定义模型…</option>
-              </select>
-            </>
+      <div className="border-b border-[var(--border)] shrink-0 text-xs">
+        {/* Header row: collapse toggle + summary + settings */}
+        <button
+          type="button"
+          onClick={() => setConfigOpen(v => !v)}
+          className="w-full flex items-center gap-2 px-4 py-2 hover:bg-[var(--accent-light)] transition-colors"
+          title={configOpen ? '收起配置' : '展开配置'}
+        >
+          {configOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          <Sliders size={12} className="text-[var(--text-tertiary)]" />
+          <span className="text-[var(--text-secondary)] truncate min-w-0 flex-1 text-left">
+            {modelsLoading ? '加载模型…'
+              : availableProviders.length === 0 ? '未配置 API Key'
+              : `${PROVIDER_LABELS[provider] || provider} · ${(model || '').split('/').pop() || '未选模型'}`}
+          </span>
+          {!configOpen && (
+            <span className="text-[10px] text-[var(--text-tertiary)] flex items-center gap-1.5 shrink-0">
+              {ragEnabled && <span className="flex items-center gap-0.5"><Database size={10}/>RAG</span>}
+              {prefs.includeCanvasContext && prefs.canvasSessionIds.length > 0 && (
+                <span className="flex items-center gap-0.5"><LayoutTemplate size={10}/>{prefs.canvasSessionIds.length}</span>
+              )}
+            </span>
           )}
+          <Settings
+            size={13}
+            className="text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] shrink-0"
+            onClick={(e: React.MouseEvent) => { e.stopPropagation(); setShowSettings(true) }}
+          />
+        </button>
 
-          <button
-            onClick={() => setShowSettings(true)}
-            className="ml-auto text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"
-            title="配置 API Key"
-          >
-            <Settings size={14} />
-          </button>
-        </div>
-
-        {/* Row 2: RAG toggle + mode + canvas context */}
-        <div className="flex items-center gap-2 px-4 pt-1 pb-2 flex-wrap">
-          <label className="flex items-center gap-1 text-xs text-[var(--text-secondary)] cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={ragEnabled}
-              onChange={e => setRagEnabled(e.target.checked)}
-              className="accent-[var(--accent)]"
-            />
-            <Database size={11} /> RAG
-          </label>
-          {ragEnabled && (
-            <select
-              className="text-xs border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
-              value={ragMode}
-              onChange={e => setRagMode(e.target.value)}
-              title="RAG 检索模式"
-            >
-              {RAG_MODES.map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
-          )}
-
-          {/* Canvas context toggle */}
-          <label className="flex items-center gap-1 text-xs text-[var(--text-secondary)] cursor-pointer select-none ml-1">
-            <input
-              type="checkbox"
-              checked={prefs.includeCanvasContext}
-              onChange={e => updatePrefs(chatSessionId, { includeCanvasContext: e.target.checked })}
-              className="accent-[var(--accent)]"
-            />
-            <LayoutTemplate size={11} /> 画布上下文
-          </label>
-
-          {prefs.includeCanvasContext && (
-            <>
+        {configOpen && (
+          <div className="px-4 pb-3 flex flex-col gap-2">
+            {modelsLoading ? (
+              <div className="flex items-center gap-1.5 text-[var(--text-tertiary)]">
+                <Spinner size={12} /> 加载模型…
+              </div>
+            ) : availableProviders.length === 0 ? (
               <button
-                type="button"
-                onClick={() => setShowCanvasPicker(v => !v)}
-                className="text-xs px-2 py-1 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                onClick={() => setShowSettings(true)}
+                className="flex items-center gap-1.5 text-[var(--warning)] hover:opacity-80 transition-opacity"
               >
-                选画布 ({prefs.canvasSessionIds.length})
+                <Settings size={12} /> 请先配置 API Key
               </button>
-              <select
-                className="text-xs border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
-                value={prefs.canvasContextMode}
-                onChange={e => updatePrefs(chatSessionId, { canvasContextMode: e.target.value as 'full' | 'summary' })}
-                title="上下文模式"
-              >
-                <option value="full">完整</option>
-                <option value="summary">摘要</option>
-              </select>
-              {estimatedTokens > 0 && (
+            ) : (
+              <>
+                {/* Row: Provider */}
+                <div className="flex items-center gap-2">
+                  <span className="text-[var(--text-tertiary)] w-16 shrink-0">平台</span>
+                  <select
+                    className="flex-1 min-w-0 border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
+                    value={provider}
+                    onChange={e => handleProviderChange(e.target.value)}
+                  >
+                    {availableProviders.map(p => (
+                      <option key={p} value={p}>{PROVIDER_LABELS[p] || p}</option>
+                    ))}
+                  </select>
+                </div>
+                {/* Row: Model */}
+                <div className="flex items-center gap-2">
+                  <span className="text-[var(--text-tertiary)] w-16 shrink-0">模型</span>
+                  <select
+                    className="flex-1 min-w-0 border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
+                    value={model}
+                    onChange={e => handleModelChange(e.target.value)}
+                  >
+                    {presets.map(m => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                    {currentCustom && !presets.find(m => m.value === currentCustom) && (
+                      <option value={currentCustom}>
+                        {currentCustom.replace(`${provider}/`, '')}（自定义）
+                      </option>
+                    )}
+                    <option value={CUSTOM_VALUE}>自定义模型…</option>
+                  </select>
+                </div>
+              </>
+            )}
+
+            {/* Row: RAG */}
+            <div className="flex items-center gap-2">
+              <span className="text-[var(--text-tertiary)] w-16 shrink-0 flex items-center gap-1"><Database size={11}/>RAG</span>
+              <label className="flex items-center gap-1 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={ragEnabled}
+                  onChange={e => setRagEnabled(e.target.checked)}
+                  className="accent-[var(--accent)]"
+                />
+                <span className="text-[var(--text-secondary)]">启用</span>
+              </label>
+              {ragEnabled && (
+                <select
+                  className="flex-1 min-w-0 border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
+                  value={ragMode}
+                  onChange={e => setRagMode(e.target.value)}
+                >
+                  {RAG_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              )}
+            </div>
+
+            {/* Row: Canvas context */}
+            <div className="flex items-center gap-2">
+              <span className="text-[var(--text-tertiary)] w-16 shrink-0 flex items-center gap-1"><LayoutTemplate size={11}/>画布</span>
+              <label className="flex items-center gap-1 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={prefs.includeCanvasContext}
+                  onChange={e => updatePrefs(chatSessionId, { includeCanvasContext: e.target.checked })}
+                  className="accent-[var(--accent)]"
+                />
+                <span className="text-[var(--text-secondary)]">启用</span>
+              </label>
+              {prefs.includeCanvasContext && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setShowCanvasPicker(v => !v)}
+                    className="flex-1 min-w-0 truncate text-left px-2 py-1 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  >
+                    选画布 ({prefs.canvasSessionIds.length})
+                  </button>
+                  <select
+                    className="shrink-0 border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
+                    value={prefs.canvasContextMode}
+                    onChange={e => updatePrefs(chatSessionId, { canvasContextMode: e.target.value as 'full' | 'summary' })}
+                  >
+                    <option value="full">完整</option>
+                    <option value="summary">摘要</option>
+                  </select>
+                </>
+              )}
+            </div>
+
+            {prefs.includeCanvasContext && estimatedTokens > 0 && (
+              <div className="flex items-center gap-2 pl-[72px]">
                 <span className={clsx('text-[11px]', estimatedTokens >= SUMMARY_SUGGEST_THRESHOLD ? 'text-[var(--warning)]' : 'text-[var(--text-tertiary)]')}>
                   ~{estimatedTokens} tokens
                   {estimatedTokens >= SUMMARY_SUGGEST_THRESHOLD && prefs.canvasContextMode === 'full' && (
@@ -447,14 +550,14 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
                     </button>
                   )}
                 </span>
-              )}
-            </>
-          )}
+              </div>
+            )}
 
-          {!ragEnabled && !prefs.includeCanvasContext && (
-            <span className="text-[11px] text-[var(--text-tertiary)]">仅使用对话上下文</span>
-          )}
-        </div>
+            {!ragEnabled && !prefs.includeCanvasContext && (
+              <span className="text-[11px] text-[var(--text-tertiary)] pl-[72px]">仅使用对话上下文</span>
+            )}
+          </div>
+        )}
 
         {showCanvasPicker && (
           <div className="px-4 pb-2">
@@ -504,12 +607,12 @@ export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessi
             onDelete={() => handleDelete(m.id)}
           />
         ))}
-        {streamBuffer && (
+        {streaming && (
           <MessageBubble
             message={{
               id: '__streaming__',
               role: 'assistant',
-              content: streamBuffer,
+              content: streamBuffer || '…',
               model_used: model,
               trace_id: null,
               meta: null,
@@ -606,23 +709,23 @@ function MessageBubble({
             {!isUser && message.model_used && (
               <span className="opacity-70">{message.model_used.split('/').pop()}</span>
             )}
-            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button onClick={copy} title="复制" className="hover:text-[var(--text-primary)]">
-                {copied ? <Check size={11} /> : <Copy size={11} />}
+            <div className="flex items-center gap-1.5">
+              <button onClick={copy} title="复制" className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)]">
+                {copied ? <Check size={12} /> : <Copy size={12} />}
               </button>
               {isUser && onEdit && (
-                <button onClick={onEdit} title="编辑" className="hover:text-[var(--text-primary)]">
-                  <Pencil size={11} />
+                <button onClick={onEdit} title="编辑" className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)]">
+                  <Pencil size={12} />
                 </button>
               )}
               {canRegenerate && onRegenerate && (
-                <button onClick={onRegenerate} title="重新生成回复" className="hover:text-[var(--accent)]">
-                  <RotateCcw size={11} />
+                <button onClick={onRegenerate} title="重新生成回复" className="text-[var(--text-tertiary)] hover:text-[var(--accent)]">
+                  <RotateCcw size={12} />
                 </button>
               )}
               {onDelete && (
-                <button onClick={onDelete} title="删除" className="hover:text-[var(--warning)]">
-                  <Trash2 size={11} />
+                <button onClick={onDelete} title="删除" className="text-[var(--text-tertiary)] hover:text-[var(--warning)]">
+                  <Trash2 size={12} />
                 </button>
               )}
             </div>
@@ -651,6 +754,75 @@ function MessageBubble({
             )}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ── Modals (replace native prompt/confirm which Simple Browser blocks) ──────
+
+function EditMessageModal({
+  initial, onCancel, onConfirm,
+}: {
+  initial: string
+  onCancel: () => void
+  onConfirm: (next: string) => void
+}) {
+  const [value, setValue] = useState(initial)
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center" onMouseDown={onCancel}>
+      <div
+        className="bg-[var(--bg-base)] border border-[var(--border)] rounded-[var(--radius-lg)] shadow-xl w-[min(560px,90vw)] p-4 flex flex-col gap-3"
+        onMouseDown={e => e.stopPropagation()}
+      >
+        <div className="text-sm font-medium text-[var(--text-primary)]">编辑消息</div>
+        <textarea
+          autoFocus
+          rows={6}
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          className="w-full border border-[var(--border)] rounded-[var(--radius-sm)] px-3 py-2 text-sm bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+        />
+        <div className="flex justify-end gap-2">
+          <button
+            className="text-xs px-3 py-1.5 rounded-[var(--radius-sm)] border border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--bg-surface)]"
+            onClick={onCancel}
+          >取消</button>
+          <button
+            className="text-xs px-3 py-1.5 rounded-[var(--radius-sm)] bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-50"
+            onClick={() => onConfirm(value)}
+            disabled={!value.trim()}
+          >保存</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ConfirmModal({
+  message, onCancel, onConfirm,
+}: {
+  message: string
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center" onMouseDown={onCancel}>
+      <div
+        className="bg-[var(--bg-base)] border border-[var(--border)] rounded-[var(--radius-lg)] shadow-xl w-[min(380px,90vw)] p-4 flex flex-col gap-3"
+        onMouseDown={e => e.stopPropagation()}
+      >
+        <div className="text-sm text-[var(--text-primary)]">{message}</div>
+        <div className="flex justify-end gap-2">
+          <button
+            className="text-xs px-3 py-1.5 rounded-[var(--radius-sm)] border border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--bg-surface)]"
+            onClick={onCancel}
+          >取消</button>
+          <button
+            className="text-xs px-3 py-1.5 rounded-[var(--radius-sm)] bg-[var(--warning)] text-white hover:opacity-90"
+            onClick={onConfirm}
+          >删除</button>
+        </div>
       </div>
     </div>
   )

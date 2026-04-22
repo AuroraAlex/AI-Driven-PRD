@@ -78,6 +78,8 @@ export default function SessionSwitcher({ projectId, kind, onChange, className }
   }, [sessions, activeId, isFetched]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const [open, setOpen] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<{ id: string; title: string } | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null)
 
   const createMut = useMutation({
     mutationFn: () => api.create(projectId),
@@ -126,7 +128,7 @@ export default function SessionSwitcher({ projectId, kind, onChange, className }
       {open && (
         <>
           <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
-          <div className="absolute z-40 mt-1 left-0 w-64 max-h-80 overflow-y-auto rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-surface)] shadow-lg flex flex-col">
+          <div className="absolute z-40 mt-1 right-0 w-72 max-h-80 overflow-y-auto rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-surface)] shadow-lg flex flex-col">
             {visible.length === 0 && (
               <div className="px-3 py-2 text-xs text-[var(--text-tertiary)]">暂无{labelFor(kind)}</div>
             )}
@@ -144,41 +146,36 @@ export default function SessionSwitcher({ projectId, kind, onChange, className }
                   setOpen(false)
                 }}
               >
-                <span className={clsx('flex-1 truncate', s.archived_at && 'line-through')}>{s.title}</span>
+                <span className={clsx('flex-1 min-w-0 truncate', s.archived_at && 'line-through')}>{s.title}</span>
                 <button
-                  className="opacity-0 group-hover:opacity-100 p-0.5 hover:text-[var(--accent)]"
+                  className="shrink-0 p-1 text-[var(--text-tertiary)] hover:text-[var(--accent)]"
                   title="重命名"
                   onClick={e => {
                     e.stopPropagation()
-                    const next = prompt(`重命名${labelFor(kind)}`, s.title)
-                    if (next && next.trim() && next !== s.title) {
-                      renameMut.mutate({ id: s.id, title: next.trim() })
-                    }
+                    setRenameTarget({ id: s.id, title: s.title })
                   }}
                 >
-                  <Pencil size={11} />
+                  <Pencil size={12} />
                 </button>
                 <button
-                  className="opacity-0 group-hover:opacity-100 p-0.5 hover:text-[var(--accent)]"
+                  className="shrink-0 p-1 text-[var(--text-tertiary)] hover:text-[var(--accent)]"
                   title={s.archived_at ? '取消归档' : '归档'}
                   onClick={e => {
                     e.stopPropagation()
                     archiveMut.mutate({ id: s.id, archived: !s.archived_at })
                   }}
                 >
-                  {s.archived_at ? <ArchiveRestore size={11} /> : <Archive size={11} />}
+                  {s.archived_at ? <ArchiveRestore size={12} /> : <Archive size={12} />}
                 </button>
                 <button
-                  className="opacity-0 group-hover:opacity-100 p-0.5 hover:text-[var(--warning)]"
+                  className="shrink-0 p-1 text-[var(--text-tertiary)] hover:text-[var(--warning)]"
                   title="删除"
                   onClick={e => {
                     e.stopPropagation()
-                    if (confirm(`确认删除${labelFor(kind)}「${s.title}」？此操作不可撤销。`)) {
-                      deleteMut.mutate(s.id)
-                    }
+                    setDeleteTarget({ id: s.id, title: s.title })
                   }}
                 >
-                  <Trash2 size={11} />
+                  <Trash2 size={12} />
                 </button>
               </div>
             ))}
@@ -192,6 +189,104 @@ export default function SessionSwitcher({ projectId, kind, onChange, className }
           </div>
         </>
       )}
+
+      {renameTarget && (
+        <RenamePrompt
+          title={`重命名${labelFor(kind)}`}
+          initial={renameTarget.title}
+          onCancel={() => setRenameTarget(null)}
+          onConfirm={(next) => {
+            const id = renameTarget.id
+            const original = renameTarget.title
+            setRenameTarget(null)
+            if (next.trim() && next.trim() !== original) {
+              renameMut.mutate({ id, title: next.trim() })
+            }
+          }}
+        />
+      )}
+      {deleteTarget && (
+        <ConfirmPrompt
+          message={`确认删除${labelFor(kind)}「${deleteTarget.title}」？此操作不可撤销。`}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={() => {
+            const id = deleteTarget.id
+            setDeleteTarget(null)
+            deleteMut.mutate(id)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function RenamePrompt({
+  title, initial, onCancel, onConfirm,
+}: {
+  title: string
+  initial: string
+  onCancel: () => void
+  onConfirm: (next: string) => void
+}) {
+  const [value, setValue] = useState(initial)
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center" onMouseDown={onCancel}>
+      <div
+        className="bg-[var(--bg-base)] border border-[var(--border)] rounded-[var(--radius-lg)] shadow-xl w-[min(420px,90vw)] p-4 flex flex-col gap-3"
+        onMouseDown={e => e.stopPropagation()}
+      >
+        <div className="text-sm font-medium text-[var(--text-primary)]">{title}</div>
+        <input
+          autoFocus
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter') onConfirm(value)
+            else if (e.key === 'Escape') onCancel()
+          }}
+          className="w-full border border-[var(--border)] rounded-[var(--radius-sm)] px-3 py-2 text-sm bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+        />
+        <div className="flex justify-end gap-2">
+          <button
+            className="text-xs px-3 py-1.5 rounded-[var(--radius-sm)] border border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--bg-surface)]"
+            onClick={onCancel}
+          >取消</button>
+          <button
+            className="text-xs px-3 py-1.5 rounded-[var(--radius-sm)] bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-50"
+            onClick={() => onConfirm(value)}
+            disabled={!value.trim()}
+          >保存</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ConfirmPrompt({
+  message, onCancel, onConfirm,
+}: {
+  message: string
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center" onMouseDown={onCancel}>
+      <div
+        className="bg-[var(--bg-base)] border border-[var(--border)] rounded-[var(--radius-lg)] shadow-xl w-[min(380px,90vw)] p-4 flex flex-col gap-3"
+        onMouseDown={e => e.stopPropagation()}
+      >
+        <div className="text-sm text-[var(--text-primary)]">{message}</div>
+        <div className="flex justify-end gap-2">
+          <button
+            className="text-xs px-3 py-1.5 rounded-[var(--radius-sm)] border border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--bg-surface)]"
+            onClick={onCancel}
+          >取消</button>
+          <button
+            className="text-xs px-3 py-1.5 rounded-[var(--radius-sm)] bg-[var(--warning)] text-white hover:opacity-90"
+            onClick={onConfirm}
+          >删除</button>
+        </div>
+      </div>
     </div>
   )
 }

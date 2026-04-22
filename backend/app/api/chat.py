@@ -69,7 +69,12 @@ async def stream_chat(
         model_used=req.model,
     )
     deps.db.add(user_msg)
-    await deps.db.flush()
+    # IMPORTANT: commit + close the request-scoped session BEFORE returning
+    # the StreamingResponse — otherwise SQLite holds a write lock for the
+    # entire stream and the assistant-message INSERT in the finally block of
+    # _run_chat_stream fails with "database is locked".
+    await deps.db.commit()
+    await deps.db.close()
 
     # Initial meta event so the client can show context size estimate
     meta = {
@@ -120,7 +125,11 @@ async def regenerate_from(
             ChatMessage.created_at > anchor.created_at,
         )
     )
-    await deps.db.flush()
+    # Commit + release the request-scoped connection so the streaming
+    # finally-block can acquire the SQLite write lock to persist the
+    # assistant reply.
+    await deps.db.commit()
+    await deps.db.close()
 
     # Build context with the (possibly edited) anchor message as user_query
     req_for_ctx = req.model_copy(update={"message": anchor.content})
@@ -285,10 +294,6 @@ async def _run_chat_stream(
     agen = deps.chat_agent.run(ctx)
     try:
         async for event in agen:
-            if await request.is_disconnected():
-                stopped = True
-                break
-
             if event.type == "token":
                 accumulated.append(event.data)
             elif event.type == "rag_hit":
@@ -304,6 +309,7 @@ async def _run_chat_stream(
 
             yield f"data: {event.to_json()}\n\n"
     except asyncio.CancelledError:
+        # Real client disconnect / explicit abort
         stopped = True
         raise
     finally:
