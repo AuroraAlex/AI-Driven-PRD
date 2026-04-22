@@ -171,15 +171,51 @@ export function createUserStoryCard(x: number, y: number): CanvasEl[] {
 
 // ── AI CARD ───────────────────────────────────────────────────────────────────
 
-export function createAICard(x: number, y: number, content = ''): CanvasEl[] {
+export interface AICardSource {
+  type: 'file' | 'canvas_card' | 'rag_chunk' | 'chat_message' | 'prd_section'
+  id: string
+  label: string
+}
+
+export interface AICardContent {
+  schemaVersion: number
+  markdown: string
+  summary: string
+  sources: AICardSource[]
+  prompt: string
+  model: string
+  generated_at: number
+  version: number
+}
+
+export function createAICard(
+  x: number,
+  y: number,
+  content: Partial<AICardContent> = {},
+): CanvasEl[] {
   const gid = uid()
   const W = 280, H = 200
+
+  const aiContent: AICardContent = {
+    schemaVersion: 1,
+    markdown: content.markdown ?? '',
+    summary: content.summary ?? '',
+    sources: content.sources ?? [],
+    prompt: content.prompt ?? '',
+    model: content.model ?? '',
+    generated_at: content.generated_at ?? Math.floor(Date.now() / 1000),
+    version: content.version ?? 1,
+  }
+
+  const previewText = (aiContent.summary || aiContent.markdown || '在这里记录 AI 的分析结果...')
+    .slice(0, 200)
 
   const bg = base({
     id: uid(), type: 'rectangle', x, y, width: W, height: H,
     backgroundColor: '#f8f0ff', strokeColor: '#9775fa',
     fillStyle: 'solid', roughness: 0, roundness: { type: 3 }, strokeWidth: 1.5,
-    groupIds: [gid], customData: { nodeType: 'ai_card' },
+    groupIds: [gid],
+    customData: { nodeType: 'ai_card', aiContent },
   })
 
   const header = base({
@@ -198,8 +234,7 @@ export function createAICard(x: number, y: number, content = ''): CanvasEl[] {
 
   const body = mkText({
     id: uid(), x: x + 12, y: y + 48, width: W - 24, height: H - 60,
-    text: content || '在这里记录 AI 的分析结果...',
-    originalText: content || '在这里记录 AI 的分析结果...',
+    text: previewText, originalText: previewText,
     fontSize: 13, fontFamily: 2, strokeColor: '#495057', groupIds: [gid],
     customData: { nodeType: 'ai_card_body' },
   })

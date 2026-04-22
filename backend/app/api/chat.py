@@ -1,21 +1,32 @@
-"""app/api/chat.py — Streaming chat endpoint (SSE)."""
+"""app/api/chat.py — Streaming chat endpoint (SSE), scoped to a chat session."""
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete as sa_delete, select
 
 from app.deps import AppDeps, get_deps
 from agents.base import AgentContext, FileContext, Message
-from infra.models import Attachment, ChatMessage, Canvas
+from agents.canvas.context import build_canvas_context, estimate_tokens
+from infra.models import (
+    Attachment,
+    Canvas,
+    CanvasSession,
+    ChatMessage,
+    ChatSession,
+)
 
-router = APIRouter(prefix="/projects/{project_id}/chat", tags=["chat"])
+router = APIRouter(
+    prefix="/projects/{project_id}/chat-sessions/{session_id}",
+    tags=["chat"],
+)
 
 
 class ChatRequest(BaseModel):
@@ -23,23 +34,190 @@ class ChatRequest(BaseModel):
     model: str = "openai/gpt-4o"
     rag_mode: str = "hybrid"
     rag_enabled: bool = True
+    include_canvas_context: bool = True
+    canvas_context_mode: str = "full"  # full | summary
+    canvas_session_ids: list[str] = []  # if empty → no canvas context
 
 
-@router.post("")
+async def _ensure_session(deps: AppDeps, project_id: str, session_id: str) -> ChatSession:
+    sess = await deps.db.get(ChatSession, session_id)
+    if not sess or sess.project_id != project_id:
+        raise HTTPException(404, "Chat session not found")
+    return sess
+
+
+@router.post("/chat")
 async def stream_chat(
     project_id: str,
+    session_id: str,
     req: ChatRequest,
+    request: Request,
     deps: Annotated[AppDeps, Depends(get_deps)],
 ):
-    # ── Gather context from DB ────────────────────────────────────────────
-    # Canvas text
-    canvas_result = await deps.db.execute(
-        select(Canvas).where(Canvas.project_id == project_id)
-    )
-    canvas = canvas_result.scalar_one_or_none()
-    canvas_text = _extract_canvas_text(canvas.elements_json if canvas else "[]")
+    await _ensure_session(deps, project_id, session_id)
 
-    # Attached files
+    ctx, valid_canvas_ids, canvas_text = await _build_context(
+        deps, project_id, session_id, req,
+    )
+
+    # Save user message
+    user_msg = ChatMessage(
+        id=str(uuid.uuid4()),
+        chat_session_id=session_id,
+        role="user",
+        content=req.message,
+        model_used=req.model,
+    )
+    deps.db.add(user_msg)
+    await deps.db.flush()
+
+    # Initial meta event so the client can show context size estimate
+    meta = {
+        "user_message_id": user_msg.id,
+        "canvas_session_ids": valid_canvas_ids,
+        "estimated_canvas_tokens": estimate_tokens(canvas_text),
+    }
+
+    return StreamingResponse(
+        _run_chat_stream(deps, session_id, req.model, ctx, request, meta),
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/messages/{message_id}/regenerate")
+async def regenerate_from(
+    project_id: str,
+    session_id: str,
+    message_id: str,
+    req: ChatRequest,
+    request: Request,
+    deps: Annotated[AppDeps, Depends(get_deps)],
+):
+    """Re-run the assistant turn that follows the given user message.
+
+    Deletes any messages strictly after `message_id` (typically the prior
+    assistant reply) and re-streams a fresh response with the supplied
+    settings (model / rag / canvas selection may differ).
+    """
+    await _ensure_session(deps, project_id, session_id)
+    anchor = await deps.db.get(ChatMessage, message_id)
+    if not anchor or anchor.chat_session_id != session_id:
+        raise HTTPException(404, "Anchor message not found")
+    if anchor.role != "user":
+        raise HTTPException(400, "Can only regenerate from a user message")
+
+    # Optionally update the user message content if changed
+    if req.message and req.message != anchor.content:
+        anchor.content = req.message
+        anchor.meta_json = json.dumps({
+            "edited_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    # Delete every message after this one
+    await deps.db.execute(
+        sa_delete(ChatMessage).where(
+            ChatMessage.chat_session_id == session_id,
+            ChatMessage.created_at > anchor.created_at,
+        )
+    )
+    await deps.db.flush()
+
+    # Build context with the (possibly edited) anchor message as user_query
+    req_for_ctx = req.model_copy(update={"message": anchor.content})
+    ctx, valid_canvas_ids, canvas_text = await _build_context(
+        deps, project_id, session_id, req_for_ctx,
+        skip_last_user=True,  # anchor is already in DB; don't double-append
+    )
+
+    meta = {
+        "user_message_id": anchor.id,
+        "regenerated": True,
+        "canvas_session_ids": valid_canvas_ids,
+        "estimated_canvas_tokens": estimate_tokens(canvas_text),
+    }
+
+    return StreamingResponse(
+        _run_chat_stream(deps, session_id, req.model, ctx, request, meta),
+        media_type="text/event-stream",
+    )
+
+
+class MessagePatch(BaseModel):
+    content: str
+
+
+@router.patch("/messages/{message_id}")
+async def edit_message(
+    project_id: str,
+    session_id: str,
+    message_id: str,
+    body: MessagePatch,
+    deps: Annotated[AppDeps, Depends(get_deps)],
+):
+    await _ensure_session(deps, project_id, session_id)
+    msg = await deps.db.get(ChatMessage, message_id)
+    if not msg or msg.chat_session_id != session_id:
+        raise HTTPException(404, "Message not found")
+    msg.content = body.content
+    existing = json.loads(msg.meta_json) if msg.meta_json else {}
+    existing["edited_at"] = datetime.now(timezone.utc).isoformat()
+    msg.meta_json = json.dumps(existing)
+    await deps.db.flush()
+    return _serialize_message(msg)
+
+
+@router.delete("/messages/{message_id}", status_code=204)
+async def delete_message(
+    project_id: str,
+    session_id: str,
+    message_id: str,
+    deps: Annotated[AppDeps, Depends(get_deps)],
+):
+    await _ensure_session(deps, project_id, session_id)
+    msg = await deps.db.get(ChatMessage, message_id)
+    if not msg or msg.chat_session_id != session_id:
+        raise HTTPException(404, "Message not found")
+    await deps.db.delete(msg)
+
+
+# ── Internal helpers ────────────────────────────────────────────────────────
+
+
+async def _build_context(
+    deps: AppDeps,
+    project_id: str,
+    session_id: str,
+    req: ChatRequest,
+    *,
+    skip_last_user: bool = False,
+) -> tuple[AgentContext, list[str], str]:
+    """Resolve canvas + files + history into an AgentContext.
+
+    ``skip_last_user``: when regenerating, the anchor user message is already
+    in the DB; we skip the final user row of history so it isn't duplicated
+    (the prompt builder appends ``ctx.user_query`` separately).
+    """
+    canvas_text = ""
+    valid_canvas_ids: list[str] = []
+    if req.include_canvas_context and req.canvas_session_ids:
+        cs_res = await deps.db.execute(
+            select(CanvasSession).where(
+                CanvasSession.project_id == project_id,
+                CanvasSession.id.in_(req.canvas_session_ids),
+            )
+        )
+        sessions = cs_res.scalars().all()
+        valid_canvas_ids = [s.id for s in sessions]
+        cv_res = await deps.db.execute(
+            select(Canvas).where(Canvas.canvas_session_id.in_(valid_canvas_ids))
+        )
+        canvases_by_sid = {c.canvas_session_id: c for c in cv_res.scalars().all()}
+        triples = [
+            (s.id, s.title, (canvases_by_sid.get(s.id).elements_json if canvases_by_sid.get(s.id) else "[]"))
+            for s in sessions
+        ]
+        canvas_text = build_canvas_context(triples, mode=req.canvas_context_mode or "full")  # type: ignore[arg-type]
+
     files_result = await deps.db.execute(
         select(Attachment).where(Attachment.project_id == project_id)
     )
@@ -56,17 +234,18 @@ async def stream_chat(
         for a in attachments
     ]
 
-    # Recent chat history
     history_result = await deps.db.execute(
         select(ChatMessage)
-        .where(ChatMessage.project_id == project_id)
+        .where(ChatMessage.chat_session_id == session_id)
         .order_by(ChatMessage.created_at.desc())
         .limit(20)
     )
-    history = [
-        Message(role=m.role, content=m.content)
-        for m in reversed(history_result.scalars().all())
-    ]
+    history_msgs = list(reversed(history_result.scalars().all()))
+    if skip_last_user:
+        # Drop the trailing user message — its content is already in user_query
+        while history_msgs and history_msgs[-1].role == "user":
+            history_msgs.pop()
+    history = [Message(role=m.role, content=m.content) for m in history_msgs]
 
     ctx = AgentContext(
         project_id=project_id,
@@ -74,81 +253,116 @@ async def stream_chat(
         canvas_text=canvas_text,
         attached_files=file_contexts,
         chat_history=history,
+        canvas_session_ids=valid_canvas_ids,
+        chat_session_id=session_id,
+        include_canvas_context=req.include_canvas_context,
+        canvas_context_mode=req.canvas_context_mode,  # type: ignore[arg-type]
         rag_mode=req.rag_mode,
         rag_enabled=req.rag_enabled,
         model=req.model,
     )
+    return ctx, valid_canvas_ids, canvas_text
 
-    # Save user message
-    user_msg = ChatMessage(
-        id=str(uuid.uuid4()),
-        project_id=project_id,
-        role="user",
-        content=req.message,
-        model_used=req.model,
-    )
-    deps.db.add(user_msg)
-    await deps.db.flush()
 
-    # ── Stream response ───────────────────────────────────────────────────
-    accumulated = []
+async def _run_chat_stream(
+    deps: AppDeps,
+    session_id: str,
+    model: str,
+    ctx: AgentContext,
+    request: Request,
+    meta: dict,
+):
+    """Common SSE generator: forwards agent events, persists assistant msg,
+    and aborts cleanly when the client disconnects."""
+    accumulated: list[str] = []
+    rag_sources: list[dict] = []
+    usage: dict = {}
     trace_id_holder: list[str] = []
+    stopped = False
 
-    async def event_stream():
-        async for event in deps.chat_agent.run(ctx):
+    yield f"data: {json.dumps({'type': 'meta', 'data': meta}, ensure_ascii=False)}\n\n"
+
+    agen = deps.chat_agent.run(ctx)
+    try:
+        async for event in agen:
+            if await request.is_disconnected():
+                stopped = True
+                break
+
             if event.type == "token":
                 accumulated.append(event.data)
+            elif event.type == "rag_hit":
+                rag_sources.append({
+                    "mode": event.data.get("mode") if isinstance(event.data, dict) else None,
+                    "context": (event.data.get("context") if isinstance(event.data, dict) else "") or "",
+                })
+            elif event.type == "done" and isinstance(event.data, dict):
+                usage = event.data.get("usage") or {}
+
             if not trace_id_holder:
                 trace_id_holder.append(event.trace_id)
-            yield f"data: {event.to_json()}\n\n"
 
-        # Persist assistant message after stream ends
+            yield f"data: {event.to_json()}\n\n"
+    except asyncio.CancelledError:
+        stopped = True
+        raise
+    finally:
+        try:
+            await agen.aclose()
+        except Exception:
+            pass
+
         full_response = "".join(accumulated)
         if full_response:
             from infra.db import get_session
+            meta_payload: dict = {}
+            if rag_sources:
+                meta_payload["rag_sources"] = rag_sources
+            if usage:
+                meta_payload["usage"] = usage
+            if stopped:
+                meta_payload["stopped"] = True
+
             async with get_session() as session:
                 assistant_msg = ChatMessage(
                     id=str(uuid.uuid4()),
-                    project_id=project_id,
+                    chat_session_id=session_id,
                     role="assistant",
                     content=full_response,
-                    model_used=req.model,
+                    model_used=model,
                     trace_id=trace_id_holder[0] if trace_id_holder else None,
+                    meta_json=json.dumps(meta_payload, ensure_ascii=False) if meta_payload else None,
                 )
                 session.add(assistant_msg)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+        if stopped:
+            yield f"data: {json.dumps({'type': 'aborted', 'data': None}, ensure_ascii=False)}\n\n"
 
 
-@router.get("/history")
+def _serialize_message(m: ChatMessage) -> dict:
+    return {
+        "id": m.id,
+        "role": m.role,
+        "content": m.content,
+        "model_used": m.model_used,
+        "trace_id": m.trace_id,
+        "meta": json.loads(m.meta_json) if m.meta_json else None,
+        "created_at": m.created_at.isoformat(),
+    }
+
+
+@router.get("/messages")
 async def get_history(
     project_id: str,
+    session_id: str,
     deps: Annotated[AppDeps, Depends(get_deps)],
-    limit: int = 50,
+    limit: int = 100,
 ):
+    await _ensure_session(deps, project_id, session_id)
     result = await deps.db.execute(
         select(ChatMessage)
-        .where(ChatMessage.project_id == project_id)
+        .where(ChatMessage.chat_session_id == session_id)
         .order_by(ChatMessage.created_at.asc())
         .limit(limit)
     )
-    messages = result.scalars().all()
-    return [
-        {"id": m.id, "role": m.role, "content": m.content, "model_used": m.model_used,
-         "trace_id": m.trace_id, "created_at": m.created_at.isoformat()}
-        for m in messages
-    ]
-
-
-def _extract_canvas_text(elements_json: str) -> str:
-    """Extract text content from Excalidraw elements JSON."""
-    try:
-        elements = json.loads(elements_json)
-        texts = [
-            el.get("text", "")
-            for el in elements
-            if el.get("type") == "text" and not el.get("isDeleted", False)
-        ]
-        return "\n".join(t for t in texts if t.strip())
-    except Exception:
-        return ""
+    return [_serialize_message(m) for m in result.scalars().all()]

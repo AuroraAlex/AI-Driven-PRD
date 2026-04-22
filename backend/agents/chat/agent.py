@@ -72,7 +72,8 @@ class ChatAgent:
                 return
 
             # ── Step 3: Stream LLM response ────────────────────────
-            async for token in self.llm.stream(messages, model=ctx.model):
+            usage_sink: dict = {}
+            async for token in self.llm.stream(messages, model=ctx.model, usage_sink=usage_sink):
                 yield AgentEvent(
                     type="token",
                     agent=self.agent_name,
@@ -80,7 +81,12 @@ class ChatAgent:
                     trace_id=trace_id,
                 )
 
-            yield AgentEvent(type="done", agent=self.agent_name, data=None, trace_id=trace_id)
+            yield AgentEvent(
+                type="done",
+                agent=self.agent_name,
+                data={"usage": usage_sink} if usage_sink else None,
+                trace_id=trace_id,
+            )
 
         except Exception as exc:
             logger.exception("ChatAgent run failed: %s", exc)

@@ -32,6 +32,7 @@ type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
 interface Props {
   projectId: string
+  canvasSessionId: string
 }
 
 /** Convert pointer event coords to Excalidraw scene coordinates. */
@@ -50,7 +51,7 @@ function toSceneCoords(
   }
 }
 
-export default function ExcalidrawCanvas({ projectId }: Props) {
+export default function ExcalidrawCanvas({ projectId, canvasSessionId }: Props) {
   const Excalidraw = useExcalidraw()
   const [excalidrawAPI, setExcalidrawAPI] = useState<ExcalidrawImperativeAPI | null>(null)
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle')
@@ -77,14 +78,22 @@ export default function ExcalidrawCanvas({ projectId }: Props) {
     }
   }, [])
 
-  // Load saved canvas — reset initialized when projectId changes
+  // Load saved canvas — reset initialized when projectId or canvasSessionId changes
   useEffect(() => {
-    if (!excalidrawAPI || initialized.current) return
+    if (!excalidrawAPI || !canvasSessionId) return
+    initialized.current = false
+    if (initialized.current) return
     initialized.current = true
     isRestoring.current = true
 
-    canvasApi.get(projectId).then(canvas => {
-      if (!canvas) { isRestoring.current = false; return }
+    canvasApi.get(projectId, canvasSessionId).then(canvas => {
+      if (!canvas) {
+        // Empty session: clear any prior scene
+        excalidrawAPI.updateScene({ elements: [], appState: {}, files: {} })
+        lastSavedElementsJson.current = '[]'
+        isRestoring.current = false
+        return
+      }
       try {
         const elements = JSON.parse(canvas.elements_json || '[]')
         const appState = JSON.parse(canvas.app_state_json || '{}')
@@ -100,11 +109,11 @@ export default function ExcalidrawCanvas({ projectId }: Props) {
     })
 
     return () => { initialized.current = false }
-  }, [excalidrawAPI, projectId])
+  }, [excalidrawAPI, projectId, canvasSessionId])
 
   // Auto-save with debounce — only when elements actually changed
   const handleChange = useCallback(() => {
-    if (!excalidrawAPI || isRestoring.current) return
+    if (!excalidrawAPI || isRestoring.current || !canvasSessionId) return
 
     const currentElementsJson = JSON.stringify(excalidrawAPI.getSceneElements())
     if (currentElementsJson === lastSavedElementsJson.current) return
@@ -124,7 +133,7 @@ export default function ExcalidrawCanvas({ projectId }: Props) {
       const elementsJson = JSON.stringify(elements)
       const appState = excalidrawAPI.getAppState()
 
-      canvasApi.save(projectId, {
+      canvasApi.save(projectId, canvasSessionId, {
         elements_json: elementsJson,
         app_state_json: JSON.stringify({
           viewBackgroundColor: appState.viewBackgroundColor,
@@ -142,7 +151,7 @@ export default function ExcalidrawCanvas({ projectId }: Props) {
         setSaveStatus('error')
       })
     }, 1500)
-  }, [excalidrawAPI, projectId])
+  }, [excalidrawAPI, projectId, canvasSessionId])
 
   // Update inspector when selection changes — only when it actually changes
   const handlePointerUp = useCallback(() => {
@@ -153,6 +162,39 @@ export default function ExcalidrawCanvas({ projectId }: Props) {
     if (next === lastSelectedId.current) return
     lastSelectedId.current = next
     useCanvasStore.getState().setSelectedElementId(next)
+  }, [excalidrawAPI])
+
+  // Double-click on an AI card → open editor modal
+  const handleDoubleClick = useCallback(() => {
+    if (!excalidrawAPI) return
+    const appState = excalidrawAPI.getAppState()
+    const selectedIds = Object.keys((appState as Record<string, unknown>).selectedElementIds as Record<string, boolean> ?? {})
+    if (!selectedIds.length) return
+    const elements = excalidrawAPI.getSceneElements()
+    for (const elId of selectedIds) {
+      const el = elements.find((e: { id: string }) => e.id === elId) as Record<string, unknown> | undefined
+      if (!el) continue
+      const cd = (el.customData as Record<string, unknown>) || {}
+      if (cd.nodeType === 'ai_card') {
+        const groupIds = (el.groupIds as string[] | undefined) || []
+        const cardId = groupIds[0] || (el.id as string)
+        useCanvasStore.getState().setOpenAICardId(cardId)
+        return
+      }
+      // If the user double-clicked a child of an AI card group, walk groupIds
+      const gids = (el.groupIds as string[] | undefined) || []
+      for (const gid of gids) {
+        const root = elements.find((e: unknown) => {
+          const ecd = ((e as Record<string, unknown>).customData as Record<string, unknown>) || {}
+          const egids = ((e as Record<string, unknown>).groupIds as string[] | undefined) || []
+          return ecd.nodeType === 'ai_card' && egids[0] === gid
+        })
+        if (root) {
+          useCanvasStore.getState().setOpenAICardId(gid)
+          return
+        }
+      }
+    }
   }, [excalidrawAPI])
 
   // Insert custom card on pointer down when a pendingTool is active
@@ -241,6 +283,7 @@ export default function ExcalidrawCanvas({ projectId }: Props) {
       style={{ width: '100%', height: '100%', position: 'relative' }}
       onPointerDown={handlePointerDown}
       onPointerUp={handlePointerUp}
+      onDoubleClick={handleDoubleClick}
     >
       <Excalidraw
         excalidrawAPI={handleApi}

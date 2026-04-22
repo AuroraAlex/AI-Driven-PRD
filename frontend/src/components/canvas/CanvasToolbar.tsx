@@ -75,7 +75,7 @@ const STICKY_COLORS: { key: StickyColor; hex: string }[] = [
 
 // ── Toolbar component ─────────────────────────────────────────────────────────
 
-export default function CanvasToolbar({ projectId }: { projectId: string }) {
+export default function CanvasToolbar({ projectId, canvasSessionId }: { projectId: string; canvasSessionId: string }) {
   const store = useCanvasStore()
 
   function setTool(tool: CustomTool | null) {
@@ -88,12 +88,12 @@ export default function CanvasToolbar({ projectId }: { projectId: string }) {
   }
 
   async function saveVersion() {
-    if (!store.api) return
+    if (!store.api || !canvasSessionId) return
     const label = prompt('版本备注（可选）') ?? '快照'
     const elements = JSON.stringify(store.api.getSceneElements())
     const appState = JSON.stringify(store.api.getAppState())
-    await canvasSnapshotApi.create(projectId, elements, appState, label)
-    const snaps = await canvasSnapshotApi.list(projectId)
+    await canvasSnapshotApi.create(projectId, canvasSessionId, elements, appState, label)
+    const snaps = await canvasSnapshotApi.list(projectId, canvasSessionId)
     store.setSnapshots(snaps)
     store.setShowVersionHistory(true)
   }
@@ -204,7 +204,8 @@ export default function CanvasToolbar({ projectId }: { projectId: string }) {
           icon: <History size={16} />,
           active: store.showVersionHistory,
           action: async () => {
-            const snaps = await canvasSnapshotApi.list(projectId)
+            if (!canvasSessionId) return
+            const snaps = await canvasSnapshotApi.list(projectId, canvasSessionId)
             store.setSnapshots(snaps)
             store.setShowVersionHistory(!store.showVersionHistory)
           },
@@ -266,8 +267,8 @@ export default function CanvasToolbar({ projectId }: { projectId: string }) {
                 className="text-left px-2 py-1.5 rounded-[var(--radius-sm)] border border-[var(--border)] text-xs
                            text-[var(--text-secondary)] hover:border-[var(--accent)] hover:text-[var(--text-primary)] transition-colors"
                 onClick={async () => {
-                  if (!store.api) return
-                  const data = await canvasSnapshotApi.restore(projectId, snap.id)
+                  if (!store.api || !canvasSessionId) return
+                  const data = await canvasSnapshotApi.restore(projectId, canvasSessionId, snap.id)
                   store.api.updateScene({
                     elements: JSON.parse(data.elements_json || '[]') as never[],
                     appState: JSON.parse(data.app_state_json || '{}') as never,

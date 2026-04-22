@@ -167,15 +167,28 @@ export default function CanvasInspector() {
         )}
 
         {/* ── AI Card body ─────────────────────────────────────────── */}
-        {(nodeType === 'ai_card' || nodeType === 'prd_card') && (
+        {nodeType === 'ai_card' && (
+          <button
+            className="text-xs px-2 py-1.5 rounded-[var(--radius-sm)] border border-[var(--accent)] text-[var(--accent)] hover:bg-[var(--accent-light)] transition-colors"
+            onClick={() => {
+              const gid = root.groupIds?.[0] ?? root.id
+              useCanvasStore.getState().setOpenAICardId(gid)
+            }}
+          >
+            打开内容编辑器
+          </button>
+        )}
+
+        {/* ── PRD card body ────────────────────────────────────────── */}
+        {nodeType === 'prd_card' && (
           <label className="flex flex-col gap-1">
             <span className="text-[10px] text-[var(--text-tertiary)] uppercase tracking-wide">内容</span>
             <textarea
               className="text-xs bg-[var(--bg-base)] border border-[var(--border)] rounded p-1.5 resize-none text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
               rows={6}
-              value={getBodyText(nodeType === 'ai_card' ? 'ai_card_body' : 'prd_card_body')}
+              value={getBodyText('prd_card_body')}
               onChange={e => {
-                const bodyType = nodeType === 'ai_card' ? 'ai_card_body' : 'prd_card_body'
+                const bodyType = 'prd_card_body'
                 const textEl = allEls.find(el =>
                   el.customData?.nodeType === bodyType && el.groupIds?.includes(root.groupIds?.[0]),
                 )

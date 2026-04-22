@@ -144,3 +144,32 @@ Excalidraw 的图片（粘贴、拖拽）不存在元素里，而是元素记录
 **修复方向**：
 - 快照表加 `files_json` 字段，与 elements 一同保存/恢复。
 - 当前为节省体积暂未加；预留在 [open-questions.md] 讨论。
+
+---
+
+## 多 Session / RAG / 引用 边界（2026-04-22）
+
+### 1. AI 上下文 token 超限
+
+- 前端 `estimateTokens(text) = text.length / 2.5`，与后端 `agents/canvas/context.estimate_tokens` 完全一致。
+- ChatPanel 当总估算 ≥ 4000 token 时显示提示并提供 **切换为摘要** 链接，触发 `canvasContextMode='summary'`。
+- 后端在 build_canvas_context 中按模式选择 `render_session(... mode='full'|'summary')`，summary 仅保留卡片标题/类型/sources。
+
+### 2. RAG 删除兜底
+
+- `RAGAgent.delete_by_doc_id(pid, doc_id)` 调用 LightRAG 删除接口；若实现不支持或失败则返回 `False`。
+- 前端在 KnowledgePanel 显示失败列表，提示用户点 **重置** 全量重建（`reset()` 会 `rmtree` 整个 `rag_data/{pid}` 并删除全部 `rag_indexes` 行）。
+
+### 3. 引用 GC
+
+- `PUT /canvas` 时后端用 `_collect_card_ids(elements_json)` 拿到当前画布所有 `groupId`，再 `DELETE FROM references WHERE (source_type='canvas_card' AND source_session_id=sid AND source_id NOT IN ...)`，反向同理。
+- 跨域引用（指向 chat_message / prd_section）不会被画布 GC 误删，因 source/target 任一端属于本画布才参与。
+
+### 4. 会话归档 vs 删除
+
+- 归档（`archived_at NOT NULL`）：列表自动隐藏，仍保留数据；可恢复。
+- 删除：CASCADE 触发，连带 canvas / snapshots / messages / references；RAGIndex 不级联（仅按 `source_session_id`），需用户在 KnowledgePanel 手动同步或重置以清理 LightRAG 图。
+
+### 5. AI 卡内容 schema 演进
+
+- 当前 `schemaVersion: 1`。未来若新增字段，前端 `AICardEditor` 在读取时 `{...blank, ...aiContent}`，向前兼容；破坏性变更需写迁移函数（按 `schemaVersion` 分支处理）。

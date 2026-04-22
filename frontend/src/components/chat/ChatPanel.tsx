@@ -1,16 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Send, Bot, User, Settings, Database } from 'lucide-react'
+import {
+  Send, Bot, User, Settings, Database, LayoutTemplate,
+  Square, RotateCcw, Pencil, Trash2, Copy, Check, ChevronDown, ChevronRight,
+} from 'lucide-react'
 import clsx from 'clsx'
-import { chatApi, settingsApi } from '../../api/client'
+import { canvasApi, canvasSessionsApi, chatApi, settingsApi, type ChatMessage, type ChatMessageMeta } from '../../api/client'
 import { useChatStore } from '../../store/chatStore'
 import { Button, Spinner } from '../ui'
 import SettingsModal from '../ui/SettingsModal'
 import CustomModelModal from './CustomModelModal'
 import MarkdownMessage from './MarkdownMessage'
+import { buildCanvasContext, estimateTokens } from '../canvas/extractCanvasContext'
 
 const RAG_MODES = ['hybrid', 'local', 'global', 'naive']
 const CUSTOM_VALUE = '__custom__'
+const SUMMARY_SUGGEST_THRESHOLD = 4000
 
 const PROVIDER_LABELS: Record<string, string> = {
   openai: 'OpenAI',
@@ -20,20 +25,35 @@ const PROVIDER_LABELS: Record<string, string> = {
 
 interface Props {
   projectId: string
+  chatSessionId: string
+  /** Default canvas session id to suggest as included context. */
+  currentCanvasSessionId?: string | null
 }
 
-export default function ChatPanel({ projectId }: Props) {
+export default function ChatPanel({ projectId, chatSessionId, currentCanvasSessionId }: Props) {
   const {
     messages, streaming, streamBuffer,
     provider, model, customModels, ragEnabled, ragMode,
     setMessages, addMessage, setStreaming, appendToken, clearBuffer,
     setProvider, setModel, setCustomModel, setRagEnabled, setRagMode,
+    getPrefs, updatePrefs,
   } = useChatStore()
+  const prefs = getPrefs(chatSessionId)
   const [input, setInput] = useState('')
   const [showSettings, setShowSettings] = useState(false)
   const [showCustomModal, setShowCustomModal] = useState(false)
+  const [showCanvasPicker, setShowCanvasPicker] = useState(false)
+  const [estimatedTokens, setEstimatedTokens] = useState(0)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
   const qc = useQueryClient()
+
+  // Auto-include current canvas session if no selection yet
+  useEffect(() => {
+    if (currentCanvasSessionId && prefs.canvasSessionIds.length === 0 && prefs.includeCanvasContext) {
+      updatePrefs(chatSessionId, { canvasSessionIds: [currentCanvasSessionId] })
+    }
+  }, [chatSessionId, currentCanvasSessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch available models based on configured API keys
   const { data: models = [], isLoading: modelsLoading } = useQuery({
@@ -81,10 +101,38 @@ export default function ChatPanel({ projectId }: Props) {
 
   // Load history on mount
   useQuery({
-    queryKey: ['chat-history', projectId],
-    queryFn: () => chatApi.history(projectId),
+    queryKey: ['chat-history', projectId, chatSessionId],
+    queryFn: () => chatApi.history(projectId, chatSessionId),
+    enabled: !!chatSessionId,
     onSuccess: setMessages,
   } as any)
+
+  // List canvas sessions for the picker
+  const { data: canvasSessions = [] } = useQuery({
+    queryKey: ['canvas-sessions', projectId],
+    queryFn: () => canvasSessionsApi.list(projectId),
+  })
+
+  // Estimate tokens of selected canvas context (whenever selection / mode changes)
+  useEffect(() => {
+    let cancelled = false
+    if (!prefs.includeCanvasContext || prefs.canvasSessionIds.length === 0) {
+      setEstimatedTokens(0)
+      return
+    }
+    Promise.all(
+      prefs.canvasSessionIds.map(async sid => {
+        const cv = await canvasApi.get(projectId, sid).catch(() => null)
+        const title = canvasSessions.find(s => s.id === sid)?.title ?? sid
+        return { sessionId: sid, title, elementsJson: cv?.elements_json ?? '[]' }
+      }),
+    ).then(inputs => {
+      if (cancelled) return
+      const text = buildCanvasContext(inputs, prefs.canvasContextMode)
+      setEstimatedTokens(estimateTokens(text))
+    })
+    return () => { cancelled = true }
+  }, [projectId, prefs.includeCanvasContext, prefs.canvasContextMode, prefs.canvasSessionIds.join(','), canvasSessions]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const presets = modelsByProvider[provider] || []
   const currentCustom = customModels[provider] || ''
@@ -110,25 +158,21 @@ export default function ChatPanel({ projectId }: Props) {
     setShowCustomModal(false)
   }
 
-  async function handleSend() {
-    const text = input.trim()
-    if (!text || streaming || !model) return
-    setInput('')
-
-    const userMsg = {
-      id: crypto.randomUUID(),
-      role: 'user' as const,
-      content: text,
-      model_used: model,
-      trace_id: null,
-      created_at: new Date().toISOString(),
-    }
-    addMessage(userMsg)
+  async function runStream(
+    streamFactory: (signal: AbortSignal) => Promise<Response>,
+    afterTokens: { tempUserMsg?: ChatMessage } = {},
+  ) {
     setStreaming(true)
     clearBuffer()
+    const ac = new AbortController()
+    abortRef.current = ac
+
+    let aborted = false
+    let meta: ChatMessageMeta = {}
+    const ragSources: ChatMessageMeta['rag_sources'] = []
 
     try {
-      const res = await chatApi.stream(projectId, text, model, ragMode, ragEnabled)
+      const res = await streamFactory(ac.signal)
       if (!res.body) throw new Error('No body')
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
@@ -144,28 +188,115 @@ export default function ChatPanel({ projectId }: Props) {
           if (!line.startsWith('data: ')) continue
           try {
             const evt = JSON.parse(line.slice(6))
-            if (evt.type === 'token') appendToken(evt.data)
-          } catch (_) { /* skip */ }
+            if (evt.type === 'token') {
+              appendToken(evt.data)
+            } else if (evt.type === 'rag_hit' && evt.data) {
+              ragSources.push({ mode: evt.data.mode ?? null, context: evt.data.context ?? '' })
+            } else if (evt.type === 'done' && evt.data?.usage) {
+              meta.usage = evt.data.usage
+            } else if (evt.type === 'aborted') {
+              aborted = true
+            } else if (evt.type === 'error') {
+              console.warn('chat error event', evt.data)
+            }
+          } catch (_) { /* skip malformed frames */ }
         }
       }
-    } catch (err) {
-      console.error('Chat stream error', err)
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        aborted = true
+      } else {
+        console.error('Chat stream error', err)
+      }
     } finally {
-      // Flush buffer into messages
-      useChatStore.getState().setMessages([
-        ...useChatStore.getState().messages,
-        {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: useChatStore.getState().streamBuffer,
-          model_used: model,
-          trace_id: null,
-          created_at: new Date().toISOString(),
-        },
-      ])
+      if (ragSources.length > 0) meta.rag_sources = ragSources
+      if (aborted) meta.stopped = true
+      const finalContent = useChatStore.getState().streamBuffer
+      if (finalContent.trim().length > 0) {
+        useChatStore.getState().setMessages([
+          ...useChatStore.getState().messages,
+          {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: finalContent,
+            model_used: model,
+            trace_id: null,
+            meta: Object.keys(meta).length ? meta : null,
+            created_at: new Date().toISOString(),
+          },
+        ])
+      }
       clearBuffer()
       setStreaming(false)
+      abortRef.current = null
+      // Refetch from server to align with persisted ids/usage
+      qc.invalidateQueries({ queryKey: ['chat-history', projectId, chatSessionId] })
+      void afterTokens
     }
+  }
+
+  async function handleSend() {
+    const text = input.trim()
+    if (!text || streaming || !model) return
+    setInput('')
+
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: text,
+      model_used: model,
+      trace_id: null,
+      meta: null,
+      created_at: new Date().toISOString(),
+    }
+    addMessage(userMsg)
+
+    await runStream(signal => chatApi.stream(projectId, chatSessionId, {
+      message: text,
+      model,
+      ragMode,
+      ragEnabled,
+      includeCanvasContext: prefs.includeCanvasContext,
+      canvasContextMode: prefs.canvasContextMode,
+      canvasSessionIds: prefs.canvasSessionIds,
+    }, signal))
+  }
+
+  function handleStop() {
+    abortRef.current?.abort()
+  }
+
+  async function handleRegenerate(userMessageId: string, content: string) {
+    if (streaming || !model) return
+    // Optimistically drop everything after the anchor in local state
+    const idx = messages.findIndex(m => m.id === userMessageId)
+    if (idx >= 0) useChatStore.getState().setMessages(messages.slice(0, idx + 1))
+    await runStream(signal => chatApi.regenerate(projectId, chatSessionId, userMessageId, {
+      message: content,
+      model,
+      ragMode,
+      ragEnabled,
+      includeCanvasContext: prefs.includeCanvasContext,
+      canvasContextMode: prefs.canvasContextMode,
+      canvasSessionIds: prefs.canvasSessionIds,
+    }, signal))
+  }
+
+  async function handleEdit(messageId: string, currentContent: string) {
+    const next = window.prompt('编辑消息内容：', currentContent)
+    if (next === null || next.trim() === currentContent.trim()) return
+    try {
+      await chatApi.editMessage(projectId, chatSessionId, messageId, next)
+      qc.invalidateQueries({ queryKey: ['chat-history', projectId, chatSessionId] })
+    } catch (err) { console.error(err) }
+  }
+
+  async function handleDelete(messageId: string) {
+    if (!window.confirm('删除该消息？')) return
+    try {
+      await chatApi.deleteMessage(projectId, chatSessionId, messageId)
+      qc.invalidateQueries({ queryKey: ['chat-history', projectId, chatSessionId] })
+    } catch (err) { console.error(err) }
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -253,8 +384,8 @@ export default function ChatPanel({ projectId }: Props) {
           </button>
         </div>
 
-        {/* Row 2: RAG toggle + mode */}
-        <div className="flex items-center gap-2 px-4 pt-1 pb-2">
+        {/* Row 2: RAG toggle + mode + canvas context */}
+        <div className="flex items-center gap-2 px-4 pt-1 pb-2 flex-wrap">
           <label className="flex items-center gap-1 text-xs text-[var(--text-secondary)] cursor-pointer select-none">
             <input
               type="checkbox"
@@ -274,10 +405,85 @@ export default function ChatPanel({ projectId }: Props) {
               {RAG_MODES.map(m => <option key={m} value={m}>{m}</option>)}
             </select>
           )}
-          {!ragEnabled && (
-            <span className="text-[11px] text-[var(--text-tertiary)]">已关闭检索，仅使用对话上下文</span>
+
+          {/* Canvas context toggle */}
+          <label className="flex items-center gap-1 text-xs text-[var(--text-secondary)] cursor-pointer select-none ml-1">
+            <input
+              type="checkbox"
+              checked={prefs.includeCanvasContext}
+              onChange={e => updatePrefs(chatSessionId, { includeCanvasContext: e.target.checked })}
+              className="accent-[var(--accent)]"
+            />
+            <LayoutTemplate size={11} /> 画布上下文
+          </label>
+
+          {prefs.includeCanvasContext && (
+            <>
+              <button
+                type="button"
+                onClick={() => setShowCanvasPicker(v => !v)}
+                className="text-xs px-2 py-1 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              >
+                选画布 ({prefs.canvasSessionIds.length})
+              </button>
+              <select
+                className="text-xs border border-[var(--border)] rounded-[var(--radius-sm)] px-2 py-1 bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none"
+                value={prefs.canvasContextMode}
+                onChange={e => updatePrefs(chatSessionId, { canvasContextMode: e.target.value as 'full' | 'summary' })}
+                title="上下文模式"
+              >
+                <option value="full">完整</option>
+                <option value="summary">摘要</option>
+              </select>
+              {estimatedTokens > 0 && (
+                <span className={clsx('text-[11px]', estimatedTokens >= SUMMARY_SUGGEST_THRESHOLD ? 'text-[var(--warning)]' : 'text-[var(--text-tertiary)]')}>
+                  ~{estimatedTokens} tokens
+                  {estimatedTokens >= SUMMARY_SUGGEST_THRESHOLD && prefs.canvasContextMode === 'full' && (
+                    <button
+                      onClick={() => updatePrefs(chatSessionId, { canvasContextMode: 'summary' })}
+                      className="ml-1 underline hover:opacity-80"
+                    >
+                      切换为摘要
+                    </button>
+                  )}
+                </span>
+              )}
+            </>
+          )}
+
+          {!ragEnabled && !prefs.includeCanvasContext && (
+            <span className="text-[11px] text-[var(--text-tertiary)]">仅使用对话上下文</span>
           )}
         </div>
+
+        {showCanvasPicker && (
+          <div className="px-4 pb-2">
+            <div className="border border-[var(--border)] rounded-[var(--radius-sm)] p-2 bg-[var(--bg-surface)] max-h-40 overflow-y-auto flex flex-col gap-1">
+              {canvasSessions.length === 0 && (
+                <span className="text-[11px] text-[var(--text-tertiary)]">该项目还没有画布</span>
+              )}
+              {canvasSessions.map(s => {
+                const checked = prefs.canvasSessionIds.includes(s.id)
+                return (
+                  <label key={s.id} className="flex items-center gap-2 text-xs cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={e => {
+                        const next = e.target.checked
+                          ? [...prefs.canvasSessionIds, s.id]
+                          : prefs.canvasSessionIds.filter(id => id !== s.id)
+                        updatePrefs(chatSessionId, { canvasSessionIds: next })
+                      }}
+                      className="accent-[var(--accent)]"
+                    />
+                    <span className={clsx(s.archived_at && 'text-[var(--text-tertiary)] line-through')}>{s.title}</span>
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Messages */}
@@ -288,8 +494,30 @@ export default function ChatPanel({ projectId }: Props) {
             <span>Start a conversation about your product requirements</span>
           </div>
         )}
-        {messages.map(m => <MessageBubble key={m.id} role={m.role} content={m.content} />)}
-        {streamBuffer && <MessageBubble role="assistant" content={streamBuffer} streaming />}
+        {messages.map(m => (
+          <MessageBubble
+            key={m.id}
+            message={m}
+            canRegenerate={m.role === 'user' && !streaming}
+            onRegenerate={() => handleRegenerate(m.id, m.content)}
+            onEdit={() => handleEdit(m.id, m.content)}
+            onDelete={() => handleDelete(m.id)}
+          />
+        ))}
+        {streamBuffer && (
+          <MessageBubble
+            message={{
+              id: '__streaming__',
+              role: 'assistant',
+              content: streamBuffer,
+              model_used: model,
+              trace_id: null,
+              meta: null,
+              created_at: new Date().toISOString(),
+            }}
+            streaming
+          />
+        )}
         <div ref={bottomRef} />
       </div>
 
@@ -307,10 +535,11 @@ export default function ChatPanel({ projectId }: Props) {
           />
           <Button
             className="self-end"
-            onClick={handleSend}
-            disabled={!input.trim() || streaming || !model}
+            onClick={streaming ? handleStop : handleSend}
+            disabled={streaming ? false : (!input.trim() || !model)}
+            title={streaming ? '停止生成' : '发送'}
           >
-            {streaming ? <Spinner size={14} /> : <Send size={14} />}
+            {streaming ? <Square size={14} /> : <Send size={14} />}
           </Button>
         </div>
       </div>
@@ -318,28 +547,110 @@ export default function ChatPanel({ projectId }: Props) {
   )
 }
 
-function MessageBubble({ role, content, streaming = false }: {
-  role: 'user' | 'assistant'
-  content: string
+function MessageBubble({
+  message, streaming = false,
+  canRegenerate, onRegenerate, onEdit, onDelete,
+}: {
+  message: ChatMessage
   streaming?: boolean
+  canRegenerate?: boolean
+  onRegenerate?: () => void
+  onEdit?: () => void
+  onDelete?: () => void
 }) {
-  const isUser = role === 'user'
+  const isUser = message.role === 'user'
+  const [copied, setCopied] = useState(false)
+  const [showSources, setShowSources] = useState(false)
+  const meta = message.meta
+
+  function copy() {
+    navigator.clipboard.writeText(message.content).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1200)
+    })
+  }
+
   return (
-    <div className={clsx('flex gap-2 items-start', isUser && 'flex-row-reverse')}>
+    <div className={clsx('group flex gap-2 items-start', isUser && 'flex-row-reverse')}>
       <div className={clsx(
         'w-6 h-6 rounded-full flex items-center justify-center shrink-0 mt-0.5',
         isUser ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-surface)] border border-[var(--border)] text-[var(--text-secondary)]',
       )}>
         {isUser ? <User size={12} /> : <Bot size={12} />}
       </div>
-      <div className={clsx(
-        'max-w-[80%] px-3 py-2 rounded-[var(--radius-md)] text-sm break-words',
-        isUser
-          ? 'bg-[var(--accent)] text-white rounded-tr-sm whitespace-pre-wrap'
-          : 'bg-[var(--bg-surface)] border border-[var(--border)] text-[var(--text-primary)] rounded-tl-sm',
-        streaming && 'after:content-[\'▋\'] after:animate-pulse after:ml-0.5',
-      )}>
-        {isUser ? content : <MarkdownMessage content={content} />}
+      <div className={clsx('max-w-[80%] flex flex-col gap-1', isUser && 'items-end')}>
+        <div className={clsx(
+          'px-3 py-2 rounded-[var(--radius-md)] text-sm break-words',
+          isUser
+            ? 'bg-[var(--accent)] text-white rounded-tr-sm whitespace-pre-wrap'
+            : 'bg-[var(--bg-surface)] border border-[var(--border)] text-[var(--text-primary)] rounded-tl-sm',
+          streaming && 'after:content-[\'▋\'] after:animate-pulse after:ml-0.5',
+          meta?.stopped && 'opacity-80',
+        )}>
+          {isUser ? message.content : <MarkdownMessage content={message.content} />}
+        </div>
+
+        {/* Footer: usage / sources / actions */}
+        {!streaming && (
+          <div className={clsx(
+            'flex items-center gap-2 text-[10px] text-[var(--text-tertiary)]',
+            isUser && 'flex-row-reverse',
+          )}>
+            {meta?.usage?.total_tokens !== undefined && (
+              <span title={`prompt ${meta.usage.prompt_tokens ?? 0} / completion ${meta.usage.completion_tokens ?? 0}`}>
+                {meta.usage.total_tokens} tok
+              </span>
+            )}
+            {meta?.stopped && <span className="text-[var(--warning)]">已中断</span>}
+            {meta?.edited_at && <span>已编辑</span>}
+            {!isUser && message.model_used && (
+              <span className="opacity-70">{message.model_used.split('/').pop()}</span>
+            )}
+            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button onClick={copy} title="复制" className="hover:text-[var(--text-primary)]">
+                {copied ? <Check size={11} /> : <Copy size={11} />}
+              </button>
+              {isUser && onEdit && (
+                <button onClick={onEdit} title="编辑" className="hover:text-[var(--text-primary)]">
+                  <Pencil size={11} />
+                </button>
+              )}
+              {canRegenerate && onRegenerate && (
+                <button onClick={onRegenerate} title="重新生成回复" className="hover:text-[var(--accent)]">
+                  <RotateCcw size={11} />
+                </button>
+              )}
+              {onDelete && (
+                <button onClick={onDelete} title="删除" className="hover:text-[var(--warning)]">
+                  <Trash2 size={11} />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* RAG source disclosure */}
+        {!isUser && meta?.rag_sources && meta.rag_sources.length > 0 && (
+          <div className="text-[10px] w-full">
+            <button
+              onClick={() => setShowSources(v => !v)}
+              className="flex items-center gap-1 text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]"
+            >
+              {showSources ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+              <Database size={10} /> {meta.rag_sources.length} 个 RAG 引用
+            </button>
+            {showSources && (
+              <div className="mt-1 border border-[var(--border)] rounded-[var(--radius-sm)] bg-[var(--bg-surface)] p-2 max-h-48 overflow-y-auto whitespace-pre-wrap text-[var(--text-secondary)]">
+                {meta.rag_sources.map((s, idx) => (
+                  <div key={idx} className={clsx(idx > 0 && 'mt-2 pt-2 border-t border-[var(--border)]')}>
+                    <div className="text-[var(--text-tertiary)] mb-0.5">mode: {s.mode || '—'}</div>
+                    {s.context}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

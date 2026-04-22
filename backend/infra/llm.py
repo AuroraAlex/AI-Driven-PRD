@@ -128,22 +128,44 @@ class LLMClient:
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        usage_sink: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[str, None]:
-        """Yield text tokens as they arrive."""
+        """Yield text tokens as they arrive.
+
+        If `usage_sink` is provided, it is mutated in-place at the end with
+        ``{"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}``
+        when the upstream model reports usage (LiteLLM with `stream_options`).
+        """
         model = _normalize_model(model or self._settings.default_model, self._settings)
+        # Ask LiteLLM to include usage in the final stream chunk if supported.
+        stream_options = kwargs.pop("stream_options", {"include_usage": True})
         response = await litellm.acompletion(
             model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
+            stream_options=stream_options,
             **kwargs,
         )
         async for chunk in response:
-            content = chunk.choices[0].delta.content
-            if content:
-                yield content
+            try:
+                if chunk.choices:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        yield content
+            except Exception:
+                pass
+            # Final chunk may carry usage even with empty choices
+            usage = getattr(chunk, "usage", None)
+            if usage and usage_sink is not None:
+                try:
+                    usage_sink["prompt_tokens"] = int(getattr(usage, "prompt_tokens", 0) or 0)
+                    usage_sink["completion_tokens"] = int(getattr(usage, "completion_tokens", 0) or 0)
+                    usage_sink["total_tokens"] = int(getattr(usage, "total_tokens", 0) or 0)
+                except Exception:
+                    pass
 
     async def complete_json(
         self,

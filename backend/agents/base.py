@@ -53,9 +53,17 @@ class AgentContext:
     user_query: str
 
     # Optional context enrichment
-    canvas_text: str = ""
+    canvas_text: str = ""                             # already-rendered canvas block(s)
     attached_files: list[FileContext] = field(default_factory=list)
     chat_history: list[Message] = field(default_factory=list)
+
+    # Session targeting (purely informational — used by callers / tracing)
+    canvas_session_ids: list[str] = field(default_factory=list)
+    chat_session_id: str | None = None
+
+    # Context toggles
+    include_canvas_context: bool = True
+    canvas_context_mode: Literal["full", "summary"] = "full"
 
     # RAG settings
     rag_mode: Literal["naive", "local", "global", "hybrid"] = "hybrid"

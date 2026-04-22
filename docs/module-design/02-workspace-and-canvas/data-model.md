@@ -1,8 +1,84 @@
 # 工作区与画布 — 数据模型
 
-> 最后更新：2026-04-21
+> 最后更新：2026-04-22（多 Session、AI 卡富内容、跨域引用、全源 RAG）
 
-本文梳理画布相关的三层数据：**数据库 ORM**、**前端全局状态（Zustand）**、**Excalidraw 场景内的自定义扩展字段**。
+本文梳理画布相关的四层数据：**数据库 ORM**、**前端全局状态（Zustand）**、**Excalidraw 场景内的自定义扩展字段**、**跨域引用与 RAG 来源元数据**。
+
+> ⚠️ 本次重构破坏性变更（无迁移脚本，需要 drop & recreate `backend/data/prd.db`）：
+> - 新增 `canvas_sessions` / `chat_sessions` / `references` 三张表。
+> - `canvases.project_id` → `canvases.canvas_session_id (UNIQUE FK CASCADE)`。
+> - `canvas_snapshots.project_id` → `canvas_snapshots.canvas_session_id`。
+> - `chat_messages.project_id` → `chat_messages.chat_session_id`。
+> - `rag_indexes` 增加 `source_type / source_session_id / source_ref / doc_id`，`attachment_id` 改为可空 + UNIQUE，新增 `UNIQUE(project_id, doc_id)` 与状态值 `unindexed`。
+> - 画布 AI 卡的根矩形 `customData` 新增 `aiContent` 字段（v1 schema）。
+
+---
+
+## 0. 新增 / 变更表速览
+
+### 0.1 `canvas_sessions`
+
+| 列 | 类型 | 备注 |
+| --- | --- | --- |
+| `id` | str (uuid) | PK |
+| `project_id` | str | FK→`projects(id)` CASCADE |
+| `title` | str | 默认 `画布 N+1` |
+| `order_index` | int | 列表排序 |
+| `archived_at` | datetime? | 归档（不删除） |
+| `created_at / updated_at` | datetime | |
+
+关系：`Project.canvas_sessions = relationship(... order_by=order_index, cascade="all, delete-orphan")`，并 `1:1` 拥有 `Canvas`。
+
+### 0.2 `chat_sessions`
+
+镜像 `canvas_sessions`，反向关系为 `messages: list[ChatMessage]`。
+
+### 0.3 `references`
+
+| 列 | 类型 | 备注 |
+| --- | --- | --- |
+| `id` | str (uuid) | PK |
+| `project_id` | str | FK→`projects(id)` CASCADE |
+| `source_type / target_type` | str | 取自 `REF_TYPES = {canvas_card, chat_message, prd_section, rag_chunk, file}` |
+| `source_id / target_id` | str | 节点业务 ID（卡片 groupId / 消息 id / PRD section id / chunk doc_id / attachment id） |
+| `source_session_id / target_session_id` | str? | 跨 session 时记录所属 session |
+| `relation` | str | `REF_RELATIONS = {cites, derived_from, mentions, embedded_in}` |
+| `metadata_json` | str? | 结构化标签 |
+| `created_at` | datetime | |
+
+约束：`UNIQUE(source_type, source_id, target_type, target_id, relation)` + `INDEX(source_type, source_id)`、`INDEX(target_type, target_id)`。
+
+### 0.4 `rag_indexes` 新字段
+
+| 列 | 类型 | 备注 |
+| --- | --- | --- |
+| `source_type` | str | 默认 `"file"`，可为 `canvas/chat/prd` |
+| `source_session_id` | str? | 关联 canvas_session / chat_session |
+| `source_ref` | str? | 文件 attachment_id / PRD prd_id / 自由文本 |
+| `doc_id` | str | LightRAG 内的文档 id，命名规则 `<source_type>:<id>` |
+| `attachment_id` | str? | 现可空且 UNIQUE |
+
+约束：`UNIQUE(project_id, doc_id)`，状态枚举追加 `"unindexed"`（来源被删除但图谱未清理）。
+
+### 0.5 AI 卡片 `customData.aiContent` (v1)
+
+```ts
+interface AICardContent {
+  schemaVersion: 1
+  markdown: string                    // 主体内容
+  summary: string                     // 卡面预览（≤200 字）
+  sources: AICardSource[]             // [{type:'canvas'|'chat'|'prd'|'file'|'rag', id, label}]
+  prompt: string                      // 生成所用的 user prompt
+  model: string                       // LLM 模型
+  generated_at: number                // ms epoch
+  version: number                     // 用户编辑次数 +1
+}
+```
+
+存储位置：`elements_json` 中 `nodeType === 'ai_card'` 的根矩形 `customData.aiContent`。
+卡面文字（`ai_card_body`）保留为 `summary || markdown` 截断 200 字的纯文本预览。
+
+---
 
 ## 1. 后端 ORM
 

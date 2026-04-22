@@ -318,3 +318,34 @@ CanvasToolbar「导出 PNG / SVG」
 | `canvasStore.api.getSceneElements()` | 任意组件可拿到 Excalidraw 场景 | 供 AI 分析结构（尚未接入） |
 | `nodeInsert.createFileCard(..., fileId)` | 由 FilePanel 拖拽到画布时调用 | 文件模块 → 画布的数据绑定入口 |
 | `nodeInsert.createAICard(x, y, content)` | 支持预填 AI 生成内容 | Chat 模块把 AI 回复"钉"到画布 |
+
+---
+
+## 多 Session、AI 卡片、知识库流程（2026-04-22 新增）
+
+### 1. 会话切换
+
+1. 进入项目，`Workspace.tsx` 通过 `useSessionStore.getCanvasSessionId(projectId)` / `getChatSessionId(projectId)` 取上次活跃会话。
+2. `SessionSwitcher` 渲染时若 `canvasSessionsApi.list()` 为空则自动 `create()` 一个默认会话；否则自动选第一个非归档项。
+3. 切换会话后 `setCurrentCanvasSessionId(sid)` 同步到 `useCanvasStore`，`<ChatPanel>` 默认把当前画布 sid 注入 prompt。
+4. `ExcalidrawCanvas` 内 `useEffect([canvasSessionId])` 重置 `initialized.current` 并调用 `canvasApi.get(pid, sid)` 重新载入。
+
+### 2. AI 卡片生成与编辑
+
+1. 在 `ChatPanel` 用 LLM 生成回答，用户点 "📌 钉到画布" → 调用 `createAICard(x, y, content)`，写入 `customData.aiContent`。
+2. 双击画布上的 AI 卡 → `ExcalidrawCanvas.handleDoubleClick` 走 `groupIds[0]` → `setOpenAICardId(gid)`。
+3. `<AICardEditor>` 弹出，可编辑 `prompt / summary / markdown`，点 **重新生成** → `aiCardsApi.generate()` SSE：`token` 帧实时累计 markdown，`card` 终帧整体覆盖 + 立即 `persist()`。
+4. 保存时 `customData.aiContent.version += 1`，并把 `summary || markdown` 截断 200 字回写到 `ai_card_body` 文本，使卡面预览刷新。
+
+### 3. 画布作为 RAG 来源
+
+1. 用户在 `KnowledgePanel` 点 **同步画布** → `knowledgeApi.sync({source_type:'canvas'})`。
+2. 后端 `RAGAgent.upsert(pid, render_session(elements), doc_id="canvas:{sid}")` 入图谱。
+3. 状态写入 `rag_indexes`：`source_type='canvas'`、`source_session_id=sid`、`doc_id='canvas:{sid}'`。
+4. 删除会话时 CASCADE 触发，但 LightRAG 内对应 `doc_id` 由 `delete_by_doc_id` 兜底，失败则建议用户点 **重置**。
+
+### 4. 引用关系维护
+
+1. AI 卡保存时若引用了画布内其它卡 / RAG chunk，前端 / 后端按需 `referencesApi.create()`（幂等 upsert）。
+2. 画布 `PUT canvas` 时后端 `_collect_card_ids()` diff，自动删除 source 或 target 不存在的 `references` 行。
+3. 任意节点旁的 `<ReferencesBadge>` 显示 `🔗 N`，点击打开 `<ReferencesDrawer>` 双向列表。

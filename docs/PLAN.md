@@ -193,12 +193,24 @@ ai-prd-tool/
 | 表名 | 关键字段 |
 |---|---|
 | `projects` | id (uuid), name, description, created_at, updated_at |
-| `canvases` | id, project_id (fk), elements_json (text), app_state_json (text), updated_at |
+| `canvas_sessions` | id, project_id (fk, cascade), title, order_index, archived_at, created_at, updated_at |
+| `canvases` | id, canvas_session_id (fk unique, cascade), elements_json, app_state_json, updated_at |
+| `canvas_snapshots` | id, canvas_session_id (fk, cascade), title, elements_json, app_state_json, created_at |
+| `chat_sessions` | id, project_id (fk, cascade), title, order_index, archived_at, created_at, updated_at |
+| `chat_messages` | id, chat_session_id (fk, cascade), role, content, model_used, trace_id, created_at |
 | `attachments` | id, project_id (fk), filename, original_name, file_type, file_size, extracted_text, rag_status, uploaded_at |
-| `chat_messages` | id, project_id (fk), role, content, model_used, trace_id, created_at |
 | `prd_documents` | id, project_id (fk), template_type, title, content_html, created_at, updated_at |
-| `rag_indexes` | id, project_id (fk), attachment_id (fk), status (pending/indexed/failed), indexed_at, error_msg |
+| `rag_indexes` | id, project_id (fk), attachment_id (fk, nullable, unique), source_type (file/canvas/chat/prd), source_session_id, source_ref, doc_id (indexed), status (pending/indexing/indexed/failed/unindexed), indexed_at, error_msg — UNIQUE(project_id, doc_id) |
+| `references` | id, project_id (fk), source_type, source_id, source_session_id, target_type, target_id, target_session_id, relation (cites/derived_from/mentions/embedded_in), metadata_json, created_at — UNIQUE(source,target,relation) |
 | `ppt_templates` | id, name, file_path, thumbnail_path, is_builtin, created_at |
+
+### 会话与引用模型
+
+- **多会话**：每个 `project` 包含 N 个 `canvas_session` 与 N 个 `chat_session`，PRD 仍为 N 个 `prd_document`。前端 `useSessionStore` 持久化每个项目当前活跃的 `(canvasSessionId, chatSessionId, prdId)`。
+- **画布作为 AI 输入**：`backend/agents/canvas/context.py` 解析 Excalidraw `elements_json`，按卡片类型（sticky_note / user_story / ai_card / prd_card / file_card / mm_root / frame / arrow）渲染为 Markdown，提供 `full` 与 `summary` 两种压缩模式；`AgentContext.canvas_session_ids` + `include_canvas_context` 控制是否注入。
+- **AI 卡片内容**：双击画布上的 `ai_card` 打开 `AICardEditor`，富内容（markdown / summary / sources / prompt / model / version）以 v1 schema 写入 `customData.aiContent` 并持久化在 `canvases.elements_json` 中。
+- **画布/对话/PRD 入 RAG**：`POST /projects/{id}/rag/sync` 按 `source_type` 同步，`doc_id` 命名规则为 `file:{attachment_id}` / `canvas:{session_id}` / `chat:{session_id}` / `prd:{prd_id}`；删除时 `RAGAgent.delete_by_doc_id` 兜底为整图重建。
+- **互引用**：`references` 表为有向边，节点类型 `canvas_card | chat_message | prd_section | rag_chunk | file`，关系 `cites | derived_from | mentions | embedded_in`，画布保存时根据卡片增删做 GC。
 
 ---
 
@@ -211,9 +223,39 @@ ai-prd-tool/
 - `PATCH  /api/projects/{id}`         — 更新项目名/描述
 - `DELETE /api/projects/{id}`         — 删除项目（级联删除所有关联数据）
 
+### Canvas Sessions
+- `GET    /api/projects/{pid}/canvas-sessions`            — 列表
+- `POST   /api/projects/{pid}/canvas-sessions`            — 创建（自动建空 canvas 行）
+- `PATCH  /api/projects/{pid}/canvas-sessions/{sid}`      — 重命名 / 排序 / 归档
+- `DELETE /api/projects/{pid}/canvas-sessions/{sid}`      — 删除（级联）
+
 ### Canvas
-- `GET    /api/projects/{id}/canvas`  — 获取画布状态
-- `PUT    /api/projects/{id}/canvas`  — 保存画布状态（防抖后调用）
+- `GET    /api/projects/{pid}/canvas-sessions/{sid}/canvas`   — 获取画布状态
+- `PUT    /api/projects/{pid}/canvas-sessions/{sid}/canvas`   — 保存（含引用 GC）
+- `GET    /api/projects/{pid}/canvas-sessions/{sid}/snapshots`        — 版本列表
+- `POST   /api/projects/{pid}/canvas-sessions/{sid}/snapshots`        — 保存版本
+- `POST   /api/projects/{pid}/canvas-sessions/{sid}/snapshots/{id}/restore` — 恢复
+
+### Chat Sessions
+- `GET / POST / PATCH / DELETE  /api/projects/{pid}/chat-sessions[/{sid}]`
+
+### Chat
+- `POST   /api/projects/{pid}/chat-sessions/{sid}/chat`        — SSE 流式对话（首帧 meta 包含画布 token 估算）
+- `GET    /api/projects/{pid}/chat-sessions/{sid}/messages`    — 历史
+
+### AI Cards
+- `POST   /api/projects/{pid}/ai-cards/generate`               — SSE，最终帧 `{type:'card', data: AICardContent}`
+
+### References
+- `GET / POST / DELETE /api/projects/{pid}/references[/{ref_id}]`
+
+### Knowledge / RAG
+- `GET   /api/projects/{pid}/rag/status`                       — 文件层级状态
+- `GET   /api/projects/{pid}/rag/sources`                      — 全部来源（file/canvas/chat/prd）
+- `POST  /api/projects/{pid}/rag/sync`                         — 按 source_type / session_ids 同步
+- `POST  /api/projects/{pid}/rag/rebuild`                      — 重建文件索引
+- `POST  /api/projects/{pid}/rag/reset`                        — 清空知识图谱
+- `POST  /api/projects/{pid}/rag/query`                        — 查询
 
 ### Files
 - `POST   /api/projects/{id}/files`   — 上传文件（multipart，≤100MB）

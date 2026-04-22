@@ -1,10 +1,62 @@
 # 工作区与画布 — 接口设计
 
-> 最后更新：2026-04-21
+> 最后更新：2026-04-22（多 session、AI 卡、引用、知识库）
 
-所有接口前缀为 `/api`。画布相关分为两组：**当前画布**（唯一，project 级别 1:1）与**历史快照**（project 级别 1:N）。
+所有接口前缀为 `/api`。**画布与对话现在均按 session 维度组织**，URL 形如 `/projects/{pid}/canvas-sessions/{sid}/...`。
 
-## 1. 路由总览
+## 0. 新增 / 重写路由总览
+
+### Sessions
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET / POST` | `/projects/{pid}/canvas-sessions` | 列表 / 创建（自动建空 canvas） |
+| `PATCH / DELETE` | `/projects/{pid}/canvas-sessions/{sid}` | 重命名/排序/归档 / 删除（级联画布与快照） |
+| `GET / POST / PATCH / DELETE` | `/projects/{pid}/chat-sessions[/{sid}]` | 同上，不会自动建子表 |
+
+### 画布（per-session）
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET / PUT` | `/projects/{pid}/canvas-sessions/{sid}/canvas` | 拉取/保存；PUT 时按卡片 groupId 增删做 `references` GC |
+| `GET / POST` | `/projects/{pid}/canvas-sessions/{sid}/snapshots` | 列表/保存版本 |
+| `GET / DELETE` | `/projects/{pid}/canvas-sessions/{sid}/snapshots/{id}` | 详情/删除 |
+| `POST` | `/projects/{pid}/canvas-sessions/{sid}/snapshots/{id}/restore` | 恢复版本 |
+
+### 对话（per-session）
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/projects/{pid}/chat-sessions/{sid}/chat` | SSE；body 含 `canvas_session_ids`、`include_canvas_context`、`canvas_context_mode`；首帧 `meta` 返回 `{canvas_session_ids, estimated_canvas_tokens}` |
+| `GET` | `/projects/{pid}/chat-sessions/{sid}/messages` | 历史消息 |
+
+### AI 卡片
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/projects/{pid}/ai-cards/generate` | SSE；中间帧 `{type:'token', data}`，最终帧 `{type:'card', data: AICardContent}` |
+
+### 引用
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/projects/{pid}/references` | 查询参数 `node_type, node_id, direction=outgoing|incoming|both` |
+| `POST` | `/projects/{pid}/references` | 幂等 upsert（按 unique 元组） |
+| `DELETE` | `/projects/{pid}/references/{ref_id}` | 删除 |
+
+### 知识库 / RAG
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/projects/{pid}/rag/status` | 文件级别状态（兼容旧接口） |
+| `GET` | `/projects/{pid}/rag/sources` | 全部 `RAGIndex` 行（含 source_type） |
+| `POST` | `/projects/{pid}/rag/sync` | body `{source_type: canvas|chat|prd, session_ids?: []}`；返回 `{indexed: [], failed: [{doc_id, error}]}` |
+| `POST` | `/projects/{pid}/rag/rebuild` | 重建文件索引 |
+| `POST` | `/projects/{pid}/rag/reset` | rmtree + 删除全部 RAGIndex 行 |
+| `POST` | `/projects/{pid}/rag/query` | 查询 |
+
+### 已废弃 / 已迁移
+- `GET / PUT  /api/projects/{pid}/canvas` → 改用 session 版本。
+- `GET / POST /api/projects/{pid}/snapshots` → 改用 session 版本。
+- `POST       /api/projects/{pid}/chat` → 改用 chat-session 版本。
+
+---
+
+## 1. 路由总览（旧版，保留参考）
 
 | 方法 | 路径 | 说明 | 状态码 |
 | --- | --- | --- | --- |

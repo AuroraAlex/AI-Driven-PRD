@@ -15,7 +15,10 @@ class Canvas(Base):
     __tablename__ = "canvases"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, unique=True)
+    canvas_session_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("canvas_sessions.id", ondelete="CASCADE"),
+        nullable=False, unique=True,
+    )
 
     # Excalidraw serialised state
     elements_json: Mapped[str] = mapped_column(Text, default="[]")
@@ -24,4 +27,4 @@ class Canvas(Base):
 
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
-    project: Mapped["Project"] = relationship("Project", back_populates="canvas")  # noqa: F821
+    session: Mapped["CanvasSession"] = relationship("CanvasSession", back_populates="canvas")  # noqa: F821

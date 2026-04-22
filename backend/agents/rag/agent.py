@@ -47,12 +47,43 @@ class RAGAgent:
         await rag.ainsert(text, ids=[doc_id])
         logger.info("RAGAgent: indexed doc %s for project %s", doc_id, project_id)
 
+    async def upsert(self, project_id: str, text: str, doc_id: str) -> None:
+        """Insert or replace a document. LightRAG dedupes by id, so we delete-then-insert."""
+        rag = self._store.get(project_id)
+        # Best-effort delete; LightRAG raises if not present, swallow it.
+        try:
+            await rag.adelete_by_doc_id(doc_id)  # type: ignore[attr-defined]
+        except Exception as exc:
+            logger.debug("RAGAgent: delete-before-upsert failed for %s: %s", doc_id, exc)
+        await rag.ainsert(text, ids=[doc_id])
+        logger.info("RAGAgent: upserted doc %s for project %s", doc_id, project_id)
+
+    async def delete_by_doc_id(self, project_id: str, doc_id: str) -> bool:
+        """Try to delete one doc from the graph. Returns True on success."""
+        rag = self._store.get(project_id)
+        try:
+            await rag.adelete_by_doc_id(doc_id)  # type: ignore[attr-defined]
+            return True
+        except Exception as exc:
+            logger.warning("RAGAgent: delete failed for %s: %s", doc_id, exc)
+            return False
+
+    async def reset(self, project_id: str) -> None:
+        """Wipe the entire LightRAG working dir for a project."""
+        import shutil
+        from config import get_settings
+        self._store.invalidate(project_id)
+        target = get_settings().rag_data_dir / project_id
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        logger.info("RAGAgent: reset graph for project %s", project_id)
+
     async def rebuild(self, project_id: str, documents: list[tuple[str, str]]) -> None:
         """
         Rebuild the entire knowledge graph for a project.
         documents: list of (doc_id, text) tuples
         """
-        self._store.invalidate(project_id)
+        await self.reset(project_id)
         rag = self._store.get(project_id)
         for doc_id, text in documents:
             await rag.ainsert(text, ids=[doc_id])

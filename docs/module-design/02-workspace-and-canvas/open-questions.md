@@ -118,3 +118,18 @@ Chat 预留"把回复钉到画布"入口，对应 `createAICard(x, y, content)`�
 - **Q3**：PRD 生成时，画布是"主数据"还是"辅助参考"？若是主数据，需要结构化导出。
 - **Q4**：Excalidraw 未来升级到 v1.0 时，元素 schema 可能有变更；何时预留迁移脚本？
 - **Q5**：画布是否需要"只读分享链接"（导出为 web 可访问快照）？
+
+---
+
+## 已闭合（2026-04-22）
+
+- **Q1（旧）画布是否要支持多版本/多视图？** → 已落地为 `canvas_sessions` 多会话；快照仍按 session 维度存。
+- **Q2（旧）画布如何被 AI 直接读取？** → 已落地 `agents/canvas/context.py` + `extractCanvasContext.ts` 镜像，`ChatAgent` 与 `AICardAgent` 都可注入。
+- **Q3（旧）PRD vs 画布主从关系？** → 现统一为 `references` 双向边；任一方都可作为 source/target。
+
+## 新增
+
+- **Q6**：画布同步入 RAG 后，是否对单卡片做 chunk 级别索引（而非整 session 一个 doc）？目前为 1 session = 1 doc，召回粒度较粗。
+- **Q7**：多用户协作（同一 session 多人编辑）何时引入？当前 session 模型已具备扩展位（`updated_at` / `version`）。
+- **Q8**：是否提供 session 间复制 / 模板化（fork canvas as template）？
+- **Q9**：AI 卡 `sources` 是否应同时写入 `references` 表，做强一致而非冗余？

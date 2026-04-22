@@ -52,6 +52,10 @@ async def _index_file_background(
                 id=str(uuid.uuid4()),
                 project_id=project_id,
                 attachment_id=attachment_id,
+                source_type="file",
+                source_session_id=None,
+                source_ref=attachment_id,
+                doc_id=doc_id,
             )
             session.add(rag_idx)
 
@@ -128,7 +132,7 @@ async def upload_file(
             project_id=project_id,
             attachment_id=attachment.id,
             file_text=extracted,
-            doc_id=attachment.id,
+            doc_id=f"file:{attachment.id}",
             rag_agent=deps.rag_agent,
         )
 

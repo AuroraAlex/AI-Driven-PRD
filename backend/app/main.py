@@ -16,7 +16,21 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
 from infra.db import init_db
-from app.api import projects, canvas, canvas_snapshot, files, chat, rag, prd, export, settings as settings_api
+from app.api import (
+    projects,
+    canvas,
+    canvas_sessions,
+    canvas_snapshot,
+    chat,
+    chat_sessions,
+    files,
+    rag,
+    prd,
+    export,
+    references,
+    ai_cards,
+    settings as settings_api,
+)
 from app.api.settings import apply_settings_to_env, load_saved_settings
 
 
@@ -54,13 +68,17 @@ def create_app() -> FastAPI:
     prefix = settings.api_prefix
 
     app.include_router(projects.router, prefix=prefix)
+    app.include_router(canvas_sessions.router, prefix=prefix)
     app.include_router(canvas.router, prefix=prefix)
     app.include_router(canvas_snapshot.router, prefix=prefix)
-    app.include_router(files.router, prefix=prefix)
+    app.include_router(chat_sessions.router, prefix=prefix)
     app.include_router(chat.router, prefix=prefix)
+    app.include_router(files.router, prefix=prefix)
     app.include_router(rag.router, prefix=prefix)
     app.include_router(prd.router, prefix=prefix)
     app.include_router(export.router, prefix=prefix)
+    app.include_router(references.router, prefix=prefix)
+    app.include_router(ai_cards.router, prefix=prefix)
     app.include_router(settings_api.router, prefix=prefix)
 
     @app.get("/health", tags=["health"])

@@ -2,6 +2,18 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { ChatMessage } from '../api/client'
 
+export interface ChatSessionPrefs {
+  includeCanvasContext: boolean
+  canvasContextMode: 'full' | 'summary'
+  canvasSessionIds: string[]
+}
+
+const defaultPrefs = (): ChatSessionPrefs => ({
+  includeCanvasContext: true,
+  canvasContextMode: 'full',
+  canvasSessionIds: [],
+})
+
 interface ChatState {
   messages: ChatMessage[]
   streaming: boolean
@@ -11,6 +23,8 @@ interface ChatState {
   customModels: Record<string, string>  // per-provider user-defined model id
   ragEnabled: boolean
   ragMode: string
+  /** chat_session_id → preferences */
+  sessionPrefs: Record<string, ChatSessionPrefs>
   setMessages: (m: ChatMessage[]) => void
   addMessage: (m: ChatMessage) => void
   setStreaming: (v: boolean) => void
@@ -21,11 +35,13 @@ interface ChatState {
   setCustomModel: (provider: string, modelId: string) => void
   setRagEnabled: (v: boolean) => void
   setRagMode: (m: string) => void
+  getPrefs: (sessionId: string) => ChatSessionPrefs
+  updatePrefs: (sessionId: string, patch: Partial<ChatSessionPrefs>) => void
 }
 
 export const useChatStore = create<ChatState>()(
   persist(
-    set => ({
+    (set, get) => ({
       messages: [],
       streaming: false,
       streamBuffer: '',
@@ -34,6 +50,7 @@ export const useChatStore = create<ChatState>()(
       customModels: {},
       ragEnabled: true,
       ragMode: 'hybrid',
+      sessionPrefs: {},
       setMessages: messages => set({ messages }),
       addMessage: m => set(s => ({ messages: [...s.messages, m] })),
       setStreaming: streaming => set({ streaming }),
@@ -45,6 +62,14 @@ export const useChatStore = create<ChatState>()(
         set(s => ({ customModels: { ...s.customModels, [provider]: modelId } })),
       setRagEnabled: ragEnabled => set({ ragEnabled }),
       setRagMode: ragMode => set({ ragMode }),
+      getPrefs: sessionId => get().sessionPrefs[sessionId] ?? defaultPrefs(),
+      updatePrefs: (sessionId, patch) =>
+        set(s => ({
+          sessionPrefs: {
+            ...s.sessionPrefs,
+            [sessionId]: { ...(s.sessionPrefs[sessionId] ?? defaultPrefs()), ...patch },
+          },
+        })),
     }),
     {
       name: 'ai-prd-chat',
@@ -54,6 +79,7 @@ export const useChatStore = create<ChatState>()(
         customModels: s.customModels,
         ragEnabled: s.ragEnabled,
         ragMode: s.ragMode,
+        sessionPrefs: s.sessionPrefs,
       }),
     },
   ),

@@ -62,7 +62,13 @@ interface CanvasState {
   // ── Change counter (triggers minimap re-render) ───────────────
   changeCount: number
   bumpChangeCount: () => void
+  // ── Active canvas session ───────────────────────────────────
+  currentCanvasSessionId: string | null
+  setCurrentCanvasSessionId: (id: string | null) => void
 
+  // ── AI card editor (modal) ──────────────────────────────────
+  openAICardId: string | null
+  setOpenAICardId: (id: string | null) => void
   // ── AI context stub ───────────────────────────────────────────
   /** Extract all text from canvas elements. Pre-wired for future AI integration. */
   extractText: () => string
@@ -100,6 +106,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
   changeCount: 0,
   bumpChangeCount: () => set(s => ({ changeCount: s.changeCount + 1 })),
+
+  currentCanvasSessionId: null,
+  setCurrentCanvasSessionId: id => set({ currentCanvasSessionId: id }),
+
+  openAICardId: null,
+  setOpenAICardId: id => set({ openAICardId: id }),
 
   extractText: () => {
     const api = get().api

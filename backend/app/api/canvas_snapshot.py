@@ -1,8 +1,9 @@
 """
-app/api/canvas_snapshot.py — Canvas version history endpoints.
+app/api/canvas_snapshot.py — Canvas version history, scoped per canvas session.
 """
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import List
 
@@ -12,13 +13,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_db
+from infra.models.canvas_session import CanvasSession
 from infra.models.canvas_snapshot import CanvasSnapshot
-from infra.models.project import Project
 
 router = APIRouter(tags=["canvas-snapshots"])
 
+PREFIX = "/projects/{project_id}/canvas-sessions/{session_id}/snapshots"
 
-# ── Schemas ───────────────────────────────────────────────────────────────────
 
 class SnapshotCreate(BaseModel):
     elements_json: str = "[]"
@@ -30,7 +31,6 @@ class SnapshotMeta(BaseModel):
     id: str
     label: str
     created_at: datetime
-
     model_config = {"from_attributes": True}
 
 
@@ -39,31 +39,24 @@ class SnapshotOut(SnapshotMeta):
     app_state_json: str
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-async def _require_project(project_id: str, db: AsyncSession) -> Project:
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    return project
+async def _require_session(project_id: str, session_id: str, db: AsyncSession) -> CanvasSession:
+    sess = await db.get(CanvasSession, session_id)
+    if not sess or sess.project_id != project_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Canvas session not found")
+    return sess
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
-
-@router.post(
-    "/projects/{project_id}/canvas/snapshots",
-    response_model=SnapshotOut,
-    status_code=status.HTTP_201_CREATED,
-)
+@router.post(PREFIX, response_model=SnapshotOut, status_code=status.HTTP_201_CREATED)
 async def create_snapshot(
     project_id: str,
+    session_id: str,
     body: SnapshotCreate,
     db: AsyncSession = Depends(get_db),
 ) -> SnapshotOut:
-    await _require_project(project_id, db)
+    await _require_session(project_id, session_id, db)
     snap = CanvasSnapshot(
-        project_id=project_id,
+        id=str(uuid.uuid4()),
+        canvas_session_id=session_id,
         elements_json=body.elements_json,
         app_state_json=body.app_state_json,
         label=body.label,
@@ -74,65 +67,45 @@ async def create_snapshot(
     return SnapshotOut.model_validate(snap)
 
 
-@router.get(
-    "/projects/{project_id}/canvas/snapshots",
-    response_model=List[SnapshotMeta],
-)
+@router.get(PREFIX, response_model=List[SnapshotMeta])
 async def list_snapshots(
     project_id: str,
+    session_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> List[SnapshotMeta]:
-    await _require_project(project_id, db)
-    result = await db.execute(
+    await _require_session(project_id, session_id, db)
+    res = await db.execute(
         select(CanvasSnapshot)
-        .where(CanvasSnapshot.project_id == project_id)
+        .where(CanvasSnapshot.canvas_session_id == session_id)
         .order_by(CanvasSnapshot.created_at.desc())
         .limit(20)
     )
-    snaps = result.scalars().all()
-    return [SnapshotMeta.model_validate(s) for s in snaps]
+    return [SnapshotMeta.model_validate(s) for s in res.scalars().all()]
 
 
-@router.get(
-    "/projects/{project_id}/canvas/snapshots/{snapshot_id}",
-    response_model=SnapshotOut,
-)
+@router.get(PREFIX + "/{snapshot_id}", response_model=SnapshotOut)
 async def get_snapshot(
     project_id: str,
+    session_id: str,
     snapshot_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> SnapshotOut:
-    await _require_project(project_id, db)
-    result = await db.execute(
-        select(CanvasSnapshot).where(
-            CanvasSnapshot.id == snapshot_id,
-            CanvasSnapshot.project_id == project_id,
-        )
-    )
-    snap = result.scalar_one_or_none()
-    if not snap:
-        raise HTTPException(status_code=404, detail="Snapshot not found")
+    await _require_session(project_id, session_id, db)
+    snap = await db.get(CanvasSnapshot, snapshot_id)
+    if not snap or snap.canvas_session_id != session_id:
+        raise HTTPException(404, "Snapshot not found")
     return SnapshotOut.model_validate(snap)
 
 
-@router.post(
-    "/projects/{project_id}/canvas/snapshots/{snapshot_id}/restore",
-    response_model=SnapshotOut,
-)
+@router.post(PREFIX + "/{snapshot_id}/restore", response_model=SnapshotOut)
 async def restore_snapshot(
     project_id: str,
+    session_id: str,
     snapshot_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> SnapshotOut:
-    """Return the snapshot content; the client is responsible for calling updateScene."""
-    await _require_project(project_id, db)
-    result = await db.execute(
-        select(CanvasSnapshot).where(
-            CanvasSnapshot.id == snapshot_id,
-            CanvasSnapshot.project_id == project_id,
-        )
-    )
-    snap = result.scalar_one_or_none()
-    if not snap:
-        raise HTTPException(status_code=404, detail="Snapshot not found")
+    await _require_session(project_id, session_id, db)
+    snap = await db.get(CanvasSnapshot, snapshot_id)
+    if not snap or snap.canvas_session_id != session_id:
+        raise HTTPException(404, "Snapshot not found")
     return SnapshotOut.model_validate(snap)
